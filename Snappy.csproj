@@ -1,0 +1,84 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <UseWPF>true</UseWPF>
+    <!-- WPF has no tray API. WinForms is here for NotifyIcon and Screen enumeration,
+         and for the self-elevation relaunch; the menu and every window wear the Desk
+         styles. -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>Snappy</RootNamespace>
+    <AssemblyName>Snappy</AssemblyName>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ApplicationIcon>Snappy.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <EnableDefaultItems>false</EnableDefaultItems>
+
+    <Product>Snappy</Product>
+    <AssemblyTitle>Snappy</AssemblyTitle>
+    <Description>One-click workspace launcher and window snapper for Windows</Description>
+    <Company>Kalkman</Company>
+    <Version>2.0.0</Version>
+    <FileVersion>2.0.0</FileVersion>
+    <InformationalVersion>2.0</InformationalVersion>
+
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="src\**\*.cs"/>
+    <ApplicationDefinition Include="src\App.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </ApplicationDefinition>
+    <Page Include="src\SettingsWindow.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <Page Include="src\ProgramsWindow.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <Page Include="src\ProgEditWindow.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <Page Include="src\PromptWindow.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+  </ItemGroup>
+
+  <!-- The shared kit. Linked to the assembly root so Desk.xaml's relative reference to
+       its theme dictionaries resolves, and so the font pack URI is /fonts/#Inter in
+       every app that consumes it. -->
+  <ItemGroup>
+    <Compile Include="..\ykit\wpf\*.cs" LinkBase="ykit"/>
+    <Page Include="..\ykit\wpf\Desk.xaml">
+      <Link>Desk.xaml</Link>
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <Page Include="..\ykit\wpf\Desk.Palette.xaml">
+      <Link>Desk.Palette.xaml</Link>
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <Resource Include="..\ykit\wpf\fonts\*.ttf" LinkBase="fonts"/>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Snappy.ico"/>
+  </ItemGroup>
+
+</Project>

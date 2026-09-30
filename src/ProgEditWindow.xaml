@@ -1,0 +1,36 @@
+<ykit:DeskWindow x:Class="Snappy.ProgEditWindow"
+                 xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:ykit="clr-namespace:Ykit"
+                 Title="Snappy — Program" Width="560" SizeToContent="Height" ResizeMode="NoResize"
+                 ShowInTaskbar="False" WindowStartupLocation="CenterOwner">
+  <DockPanel>
+    <Border DockPanel.Dock="Bottom" Style="{StaticResource Desk.CommitBar}">
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+        <Button x:Name="CancelButton" Content="Cancel" Style="{StaticResource Desk.Button}" Margin="0,0,9,0" IsCancel="True"/>
+        <Button x:Name="SaveButton" Content="Save program" Style="{StaticResource Desk.Button.Primary}" IsDefault="True"/>
+      </StackPanel>
+    </Border>
+    <StackPanel Margin="22,20,22,8">
+      <TextBlock Text="Program details" Style="{StaticResource Desk.Text.InspectorHeading}" Margin="0,0,0,14"/>
+
+      <TextBlock Text="Name" Style="{StaticResource Desk.Text.Tertiary}" Margin="0,0,0,4"/>
+      <TextBox x:Name="NameBox" Style="{StaticResource Desk.TextBox}" AutomationProperties.Name="Program name"/>
+
+      <TextBlock Text="Program or shortcut" Style="{StaticResource Desk.Text.Tertiary}" Margin="0,14,0,4"/>
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBox x:Name="ExeBox" Style="{StaticResource Desk.TextBox}" AutomationProperties.Name="Program path"/>
+        <Button x:Name="BrowseButton" Grid.Column="1" Content="Browse…" Style="{StaticResource Desk.Button}" Margin="8,0,0,0"/>
+      </Grid>
+
+      <TextBlock Text="Arguments (optional)" Style="{StaticResource Desk.Text.Tertiary}" Margin="0,14,0,4"/>
+      <TextBox x:Name="ArgsBox" Style="{StaticResource Desk.TextBox}" AutomationProperties.Name="Program arguments"/>
+
+      <TextBlock x:Name="Error" Style="{StaticResource Desk.Text.Warning}" Margin="0,10,0,0" Visibility="Collapsed"/>
+    </StackPanel>
+  </DockPanel>
+</ykit:DeskWindow>

@@ -1,0 +1,16 @@
+graphify-out/
+artifacts/
+bin/
+obj/
+snappy.log
+Snappy.exe
+Snappy.exe.config
+mac/.build/
+mac/build/
+.DS_Store
+
+# Syncthing artefacts (rig <-> Mac live sync). In-transfer temporaries and conflict copies are
+# never anybody's work, and they make the other machine's repo look dirty forever.
+*.sync-conflict-*
+~syncthing~*
+.syncthing.*.tmp
