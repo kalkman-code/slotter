@@ -5,15 +5,15 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>Snappy</string>
+	<string>Slotter</string>
 	<key>CFBundleIconFile</key>
-	<string>Snappy</string>
+	<string>Slotter</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.tobykalkman.snappy</string>
+	<string>uk.co.kalkman.slotter</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Snappy</string>
+	<string>Slotter</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

@@ -1,0 +1,540 @@
+import AppKit
+import Observation
+import SlotterKit
+
+/// The designer's staged state. Nothing here reaches `profiles.ini` until `save()`, and
+/// `cancel()` puts back what was last saved.
+@MainActor
+@Observable
+public final class SettingsModel {
+    public enum Face: Sendable { case zone, settings }
+    public enum Field: Sendable, CaseIterable { case x, y, w, h }
+    public enum FocusTarget: Equatable, Sendable { case rename, field(Field), programPath(UUID) }
+
+    public struct Renaming: Equatable, Sendable {
+        public var workspaceID: UUID
+        public var value: String
+
+        public init(workspaceID: UUID, value: String) {
+            self.workspaceID = workspaceID
+            self.value = value
+        }
+    }
+
+    /// What the settings face reports about the running app, pushed in by `AppController`.
+    public struct Status: Sendable {
+        public var accessibilityTrusted: Bool
+        public var shortcutCount: Int
+        public var shortcutFailures: Int
+        public var loginNeedsApproval: Bool
+
+        public init(accessibilityTrusted: Bool = true, shortcutCount: Int = 0, shortcutFailures: Int = 0,
+                    loginNeedsApproval: Bool = false) {
+            self.accessibilityTrusted = accessibilityTrusted
+            self.shortcutCount = shortcutCount
+            self.shortcutFailures = shortcutFailures
+            self.loginNeedsApproval = loginNeedsApproval
+        }
+    }
+
+    public struct Actions {
+        public var save: (SlotterConfig) -> SlotterConfig
+        public var openAccessibilitySettings: () -> Void
+        public var openLoginItemsSettings: () -> Void
+
+        public init(save: @escaping (SlotterConfig) -> SlotterConfig = { $0 },
+                    openAccessibilitySettings: @escaping () -> Void = {},
+                    openLoginItemsSettings: @escaping () -> Void = {}) {
+            self.save = save
+            self.openAccessibilitySettings = openAccessibilitySettings
+            self.openLoginItemsSettings = openLoginItemsSettings
+        }
+    }
+
+    public enum ZoneFault: Equatable, Sendable {
+        case empty
+        case negative
+        case pastRight(Double)
+        case pastBottom(Double)
+    }
+
+    public struct Fault: Sendable {
+        public enum Kind: Sendable { case name, zone(workspace: UUID, zone: UUID), program(UUID) }
+        public var kind: Kind
+        public var message: String
+    }
+
+    public var workspaces: [Workspace]
+    public var programs: [Program]
+    public var lastWorkspace: String
+    public var startAtLogin: Bool
+    public var shortcuts: [String: String]
+
+    public var snapshot: DisplaySnapshot
+    public var remembered: [String: RememberedMonitor]
+    public var status: Status
+    public var actions: Actions
+
+    public var selectedWorkspaceID: UUID?
+    public var selectedZoneID: UUID?
+    public var face: Face?
+    public var renaming: Renaming?
+    public var showingPrograms = false
+    public var selectedProgramID: UUID?
+    public var pendingConfirm: PendingConfirm?
+    public var focusRequest: FocusTarget?
+
+    public private(set) var dirty = false
+    public private(set) var saved = false
+
+    private var original: SlotterConfig
+
+    public static let designerPresets = ["Full", "2 columns", "3 columns", "4 columns", "2 rows", "3 rows",
+                                         "2 × 2 grid", "Left ⅔ + right ⅓", "Left ⅓ + right ⅔"]
+        .compactMap { name in PresetCatalog.all.first { $0.name == name } }
+
+    public init(config: SlotterConfig, snapshot: DisplaySnapshot = DisplayRegistry.current,
+                remembered: [String: RememberedMonitor] = MonitorMemory.load(),
+                status: Status = Status(), actions: Actions = Actions()) {
+        self.remembered = remembered
+        original = config
+        workspaces = config.workspaces
+        programs = config.programs
+        lastWorkspace = config.lastWorkspace
+        startAtLogin = config.startAtLogin
+        shortcuts = config.shortcuts
+        self.snapshot = snapshot
+        self.status = status
+        self.actions = actions
+        let first = config.workspace(named: config.lastWorkspace) ?? config.workspaces.first
+        selectedWorkspaceID = first?.id
+        selectedZoneID = first?.zones.first?.id
+        face = first == nil ? nil : .zone
+        selectedProgramID = config.programs.first?.id
+    }
+
+    public var config: SlotterConfig {
+        SlotterConfig(workspaces: workspaces, programs: programs, lastWorkspace: lastWorkspace,
+                      startAtLogin: startAtLogin, shortcuts: shortcuts)
+    }
+
+    // MARK: - Lookup
+
+    public var desk: DeskArrangement {
+        DeskPlanner.arrange(snapshot, references: workspaces.flatMap { $0.zones.map(\.monitor) }, remembered: remembered)
+    }
+
+    public var selectedWorkspace: Workspace? {
+        workspaces.first { $0.id == selectedWorkspaceID }
+    }
+
+    private var selectedWorkspaceIndex: Int? {
+        workspaces.firstIndex { $0.id == selectedWorkspaceID }
+    }
+
+    public var selectedZone: Zone? {
+        selectedWorkspace?.zones.first { $0.id == selectedZoneID }
+    }
+
+    public func monitorKey(_ zone: Zone) -> String {
+        DeskPlanner.key(for: zone.monitor, in: snapshot)
+    }
+
+    public func number(of zone: Zone, in workspace: Workspace) -> Int {
+        (workspace.zones.firstIndex { $0.id == zone.id } ?? 0) + 1
+    }
+
+    /// The monitors a workspace uses, in desk order.
+    public func monitorKeys(of workspace: Workspace, in desk: DeskArrangement) -> [String] {
+        let used = Set(workspace.zones.map(monitorKey))
+        return desk.monitors.map(\.id).filter(used.contains)
+    }
+
+    public func isOffline(_ key: String) -> Bool { key.hasPrefix("offline:") }
+
+    public func isFullyOffline(_ workspace: Workspace) -> Bool {
+        let keys = Set(workspace.zones.map(monitorKey))
+        return !keys.isEmpty && keys.allSatisfy(isOffline)
+    }
+
+    public func program(named name: String?) -> Program? {
+        guard let name, !name.isEmpty else { return nil }
+        return programs.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+    }
+
+    /// Workspaces grouped by the set of monitors each uses, groups in order of first appearance.
+    public func groups(in desk: DeskArrangement) -> [(keys: [String], workspaces: [Workspace])] {
+        var result: [(keys: [String], workspaces: [Workspace])] = []
+        for workspace in workspaces {
+            let keys = monitorKeys(of: workspace, in: desk)
+            if let index = result.firstIndex(where: { $0.keys == keys }) {
+                result[index].workspaces.append(workspace)
+            } else {
+                result.append((keys, [workspace]))
+            }
+        }
+        return result
+    }
+
+    public func presetMatch(on key: String, in workspace: Workspace) -> LayoutPreset? {
+        let zones = workspace.zones.filter { monitorKey($0) == key }
+        return Self.designerPresets.first { preset in
+            preset.zones.count == zones.count && preset.zones.allSatisfy { fraction in
+                zones.contains {
+                    abs($0.x - fraction.x) < 0.2 && abs($0.y - fraction.y) < 0.2
+                        && abs($0.w - fraction.w) < 0.2 && abs($0.h - fraction.h) < 0.2
+                }
+            }
+        }
+    }
+
+    // MARK: - Validation
+
+    public func fault(of zone: Zone) -> ZoneFault? {
+        if zone.w <= 0 || zone.h <= 0 { return .empty }
+        if zone.x < 0 || zone.y < 0 { return .negative }
+        if zone.x + zone.w > 100.05 { return .pastRight(zone.x + zone.w - 100) }
+        if zone.y + zone.h > 100.05 { return .pastBottom(zone.y + zone.h - 100) }
+        return nil
+    }
+
+    public var renameError: String? {
+        guard let renaming else { return nil }
+        let own = workspaces.first { $0.id == renaming.workspaceID }
+        return Validate.workspaceName(renaming.value, excluding: own, in: workspaces)
+    }
+
+    public var faults: [Fault] {
+        var result: [Fault] = []
+        if let error = renameError { result.append(Fault(kind: .name, message: error)) }
+        for workspace in workspaces {
+            for zone in workspace.zones {
+                guard let fault = fault(of: zone) else { continue }
+                let number = number(of: zone, in: workspace)
+                let message: String
+                switch fault {
+                case .empty: message = "\(workspace.name) zone \(number) has no width or height"
+                case .negative: message = "\(workspace.name) zone \(number) starts off the screen"
+                case .pastRight: message = "\(workspace.name) zone \(number) runs past the right edge"
+                case .pastBottom: message = "\(workspace.name) zone \(number) runs past the bottom edge"
+                }
+                result.append(Fault(kind: .zone(workspace: workspace.id, zone: zone.id), message: message))
+            }
+        }
+        for program in programs where program.path.trimmingCharacters(in: .whitespaces).isEmpty {
+            result.append(Fault(kind: .program(program.id), message: "Choose an application for \(program.name)"))
+        }
+        return result
+    }
+
+    public func gotoFirstFault() {
+        guard let first = faults.first else { return }
+        switch first.kind {
+        case .name:
+            focusRequest = .rename
+        case let .zone(workspaceID, zoneID):
+            showingPrograms = false
+            selectedWorkspaceID = workspaceID
+            selectedZoneID = zoneID
+            face = .zone
+            guard let zone = selectedZone else { return }
+            switch fault(of: zone) {
+            case .pastRight: focusRequest = .field(.w)
+            case .pastBottom: focusRequest = .field(.h)
+            default: focusRequest = .field(.x)
+            }
+        case let .program(id):
+            selectedProgramID = id
+            showingPrograms = true
+            focusRequest = .programPath(id)
+        }
+    }
+
+    // MARK: - Commit
+
+    private func touch() {
+        dirty = true
+        saved = false
+    }
+
+    public func save() {
+        guard dirty, faults.isEmpty else {
+            gotoFirstFault()
+            return
+        }
+        let stored = actions.save(config)
+        original = stored
+        startAtLogin = stored.startAtLogin
+        dirty = false
+        saved = true
+    }
+
+    public func toggleStartAtLogin() {
+        startAtLogin.toggle()
+        touch()
+    }
+
+    public func cancel() {
+        workspaces = original.workspaces
+        programs = original.programs
+        lastWorkspace = original.lastWorkspace
+        startAtLogin = original.startAtLogin
+        shortcuts = original.shortcuts
+        renaming = nil
+        dirty = false
+        if selectedWorkspace == nil { selectedWorkspaceID = workspaces.first?.id }
+        if selectedZone == nil { selectedZoneID = selectedWorkspace?.zones.first?.id }
+        if programs.first(where: { $0.id == selectedProgramID }) == nil { selectedProgramID = programs.first?.id }
+        if selectedWorkspace == nil, face == .zone { face = nil }
+    }
+
+    // MARK: - Workspaces
+
+    public func selectWorkspace(_ id: UUID) {
+        selectedWorkspaceID = id
+        selectedZoneID = selectedWorkspace?.zones.first?.id
+        if face != .settings { face = selectedZoneID == nil ? nil : .zone }
+    }
+
+    public func selectZone(_ id: UUID) {
+        selectedZoneID = id
+        face = .zone
+    }
+
+    public func toggleFace(_ target: Face) {
+        face = face == target ? nil : target
+    }
+
+    /// One full zone on every connected monitor, then straight into rename.
+    public func addWorkspace() {
+        var index = 1
+        while workspaces.contains(where: { $0.name.caseInsensitiveCompare("Workspace \(index)") == .orderedSame }) {
+            index += 1
+        }
+        let zones = snapshot.ordered().map {
+            Zone(monitor: DisplayRegistry.reference(for: $0, in: snapshot), x: 0, y: 0, w: 100, h: 100)
+        }
+        let workspace = Workspace(name: "Workspace \(index)", zones: zones)
+        workspaces.append(workspace)
+        selectedWorkspaceID = workspace.id
+        selectedZoneID = zones.first?.id
+        face = zones.isEmpty ? nil : .zone
+        renaming = Renaming(workspaceID: workspace.id, value: workspace.name)
+        focusRequest = .rename
+        touch()
+    }
+
+    public func beginRename() {
+        guard let workspace = selectedWorkspace else { return }
+        renaming = Renaming(workspaceID: workspace.id, value: workspace.name)
+        focusRequest = .rename
+    }
+
+    public func commitRename() {
+        guard let renaming, renameError == nil,
+              let index = workspaces.firstIndex(where: { $0.id == renaming.workspaceID }) else { return }
+        let name = renaming.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let old = workspaces[index].name
+        self.renaming = nil
+        guard name != old else { return }
+        workspaces[index].name = name
+        if lastWorkspace.caseInsensitiveCompare(old) == .orderedSame { lastWorkspace = name }
+        touch()
+    }
+
+    public func cancelRename() {
+        renaming = nil
+    }
+
+    public func removeSelectedWorkspace() {
+        guard let index = selectedWorkspaceIndex else { return }
+        let removed = workspaces.remove(at: index)
+        if renaming?.workspaceID == removed.id { renaming = nil }
+        if lastWorkspace.caseInsensitiveCompare(removed.name) == .orderedSame { lastWorkspace = "" }
+        selectedWorkspaceID = nil
+        if let next = workspaces.first { selectWorkspace(next.id) } else { selectedZoneID = nil; face = face == .settings ? .settings : nil }
+        touch()
+    }
+
+    // MARK: - Zones
+
+    private func mutateWorkspace(_ body: (inout Workspace) -> Void) {
+        guard let index = selectedWorkspaceIndex else { return }
+        body(&workspaces[index])
+        touch()
+    }
+
+    private func mutateZone(_ body: (inout Zone) -> Void) {
+        guard let index = selectedWorkspaceIndex,
+              let zoneIndex = workspaces[index].zones.firstIndex(where: { $0.id == selectedZoneID }) else { return }
+        body(&workspaces[index].zones[zoneIndex])
+        touch()
+    }
+
+    public func setValue(_ field: Field, _ value: Double) {
+        guard value.isFinite else { return }
+        let rounded = (value * 100).rounded() / 100
+        mutateZone { zone in
+            switch field {
+            case .x: zone.x = rounded
+            case .y: zone.y = rounded
+            case .w: zone.w = rounded
+            case .h: zone.h = rounded
+            }
+        }
+    }
+
+    public func fitSelectedZone() {
+        mutateZone { zone in
+            if zone.x + zone.w > 100 { zone.w = ((100 - zone.x) * 100).rounded() / 100 }
+            if zone.y + zone.h > 100 { zone.h = ((100 - zone.y) * 100).rounded() / 100 }
+        }
+    }
+
+    public func assignProgram(_ name: String?) {
+        mutateZone { $0.program = (name?.isEmpty ?? true) ? nil : name }
+    }
+
+    public func splitSelectedZone(vertical: Bool) {
+        guard let zone = selectedZone else { return }
+        let halves = vertical ? ZoneOps.splitVertical(zone) : ZoneOps.splitHorizontal(zone)
+        mutateWorkspace { workspace in
+            guard let index = workspace.zones.firstIndex(where: { $0.id == zone.id }) else { return }
+            workspace.zones.replaceSubrange(index...index, with: halves)
+        }
+        selectedZoneID = halves.last?.id
+        face = .zone
+    }
+
+    public func canDeleteSelectedZone() -> Bool {
+        guard let zone = selectedZone, let workspace = selectedWorkspace else { return false }
+        let key = monitorKey(zone)
+        return workspace.zones.filter { monitorKey($0) == key }.count > 1
+    }
+
+    public func deleteSelectedZone() {
+        guard canDeleteSelectedZone(), let zone = selectedZone else { return }
+        let key = monitorKey(zone)
+        mutateWorkspace { $0.zones.removeAll { $0.id == zone.id } }
+        selectedZoneID = selectedWorkspace?.zones.first { monitorKey($0) == key }?.id
+    }
+
+    /// Replaces every zone on the selected zone's monitor, carrying the apps across in reading order.
+    public func applyPreset(_ preset: LayoutPreset) {
+        guard let zone = selectedZone else { return }
+        let key = monitorKey(zone)
+        var made: [Zone] = []
+        mutateWorkspace { workspace in
+            let old = workspace.zones.filter { monitorKey($0) == key }
+                .sorted { ($0.y, $0.x) < ($1.y, $1.x) }
+            let at = workspace.zones.firstIndex { monitorKey($0) == key } ?? workspace.zones.count
+            made = ZoneOps.zones(from: preset, monitor: zone.monitor)
+            for index in made.indices where index < old.count { made[index].program = old[index].program }
+            workspace.zones.removeAll { monitorKey($0) == key }
+            workspace.zones.insert(contentsOf: made, at: min(at, workspace.zones.count))
+        }
+        selectedZoneID = made.first?.id
+    }
+
+    public func resetSelectedMonitor() {
+        guard let zone = selectedZone else { return }
+        let key = monitorKey(zone)
+        let keep = selectedWorkspace?.zones.first { monitorKey($0) == key && $0.program != nil }?.program
+        applyPreset(PresetCatalog.all[0])
+        mutateZone { $0.program = keep }
+    }
+
+    public func canStopUsingSelectedMonitor() -> Bool {
+        guard let workspace = selectedWorkspace else { return false }
+        return Set(workspace.zones.map(monitorKey)).count > 1
+    }
+
+    public func stopUsingSelectedMonitor() {
+        guard canStopUsingSelectedMonitor(), let zone = selectedZone else { return }
+        let key = monitorKey(zone)
+        mutateWorkspace { $0.zones.removeAll { monitorKey($0) == key } }
+        selectedZoneID = selectedWorkspace?.zones.first?.id
+    }
+
+    public func useMonitor(_ monitor: DeskMonitor) {
+        let zone = Zone(monitor: monitor.reference, x: 0, y: 0, w: 100, h: 100)
+        mutateWorkspace { $0.zones.append(zone) }
+        selectedZoneID = zone.id
+        face = .zone
+    }
+
+    public func moveZoneSelection(by delta: Int) {
+        guard let workspace = selectedWorkspace, !workspace.zones.isEmpty else { return }
+        let current = workspace.zones.firstIndex { $0.id == selectedZoneID } ?? (delta > 0 ? -1 : 0)
+        let count = workspace.zones.count
+        selectedZoneID = workspace.zones[((current + delta) % count + count) % count].id
+        face = .zone
+    }
+
+    // MARK: - Programs
+
+    public func zoneUses(of program: Program) -> [String] {
+        workspaces.flatMap { workspace in
+            workspace.zones.enumerated().compactMap { index, zone in
+                zone.program?.caseInsensitiveCompare(program.name) == .orderedSame
+                    ? "\(workspace.name) · zone \(index + 1)" : nil
+            }
+        }
+    }
+
+    public func addProgram() {
+        var name = "New program"
+        var index = 2
+        while program(named: name) != nil {
+            name = "New program \(index)"
+            index += 1
+        }
+        let program = Program(name: name, path: "")
+        programs.append(program)
+        selectedProgramID = program.id
+        touch()
+    }
+
+    public func removeSelectedProgram() {
+        guard let index = programs.firstIndex(where: { $0.id == selectedProgramID }) else { return }
+        let removed = programs.remove(at: index)
+        for w in workspaces.indices {
+            for z in workspaces[w].zones.indices
+            where workspaces[w].zones[z].program?.caseInsensitiveCompare(removed.name) == .orderedSame {
+                workspaces[w].zones[z].program = nil
+            }
+        }
+        selectedProgramID = programs.isEmpty ? nil : programs[min(index, programs.count - 1)].id
+        touch()
+    }
+
+    /// Applied only when valid, so a half-typed name that briefly matches another program never
+    /// merges their zones. Returns the reason it was not applied.
+    @discardableResult
+    public func renameProgram(_ id: UUID, to raw: String) -> String? {
+        guard let index = programs.firstIndex(where: { $0.id == id }) else { return nil }
+        if let error = Validate.programName(raw, excluding: programs[index], in: programs) { return error }
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let old = programs[index].name
+        guard name != old else { return nil }
+        programs[index].name = name
+        for w in workspaces.indices {
+            for z in workspaces[w].zones.indices
+            where workspaces[w].zones[z].program?.caseInsensitiveCompare(old) == .orderedSame {
+                workspaces[w].zones[z].program = name
+            }
+        }
+        touch()
+        return nil
+    }
+
+    public func updateProgram(_ id: UUID, _ body: (inout Program) -> Void) {
+        guard let index = programs.firstIndex(where: { $0.id == id }) else { return }
+        body(&programs[index])
+        touch()
+    }
+
+    public func confirm(_ request: ConfirmRequest, action: @escaping () -> Void) {
+        pendingConfirm = PendingConfirm(request: request, action: action)
+    }
+}

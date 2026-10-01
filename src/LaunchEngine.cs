@@ -6,7 +6,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 
-namespace Snappy
+namespace Slotter
 {
     // Opens a workspace's programs and places each into its zone. Runs on a
     // background thread; the caller marshals the result back to the UI thread.
@@ -123,7 +123,7 @@ namespace Snappy
             return 0;
         }
 
-        // Hard-terminate every process that owns a user window - except the shell and Snappy.
+        // Hard-terminate every process that owns a user window - except the shell and Slotter.
         public static int ForceKillAll(List<IntPtr> windows)
         {
             int self = Process.GetCurrentProcess().Id;

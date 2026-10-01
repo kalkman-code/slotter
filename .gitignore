@@ -2,9 +2,9 @@ graphify-out/
 artifacts/
 bin/
 obj/
-snappy.log
-Snappy.exe
-Snappy.exe.config
+slotter.log
+Slotter.exe
+Slotter.exe.config
 mac/.build/
 mac/build/
 .DS_Store

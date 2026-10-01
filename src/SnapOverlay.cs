@@ -5,9 +5,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
-using System.Windows.Shapes;
 
-namespace Snappy
+namespace Slotter
 {
     // The full-screen zone highlight shown while dragging a window's title bar. Drawn
     // vector rather than GDI, so it is correct at any DPI with no manual scaling.
@@ -35,6 +34,8 @@ namespace Snappy
         [DllImport("user32.dll", SetLastError = true)] static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
         readonly System.Drawing.Rectangle bounds;
+        readonly Border outline, chip;
+        readonly TextBlock text;
 
         public SnapOverlay(System.Drawing.Rectangle bounds, string label)
         {
@@ -47,59 +48,45 @@ namespace Snappy
             ResizeMode = ResizeMode.NoResize;
             Background = System.Windows.Media.Brushes.Transparent;
             WindowStartupLocation = WindowStartupLocation.Manual;
+            FontFamily = Ui.UiFont;
+            UseLayoutRounding = true;
+            Content = Build(label, out outline, out chip, out text);
+        }
 
+        // Drawn on the real screen with no bezel art: the desktop dimmed, each zone an outline
+        // with its number and app, and the zone under the cursor filled and thickened, so it
+        // reads without the colour.
+        public static Grid Build(string label, out Border outline, out Border chip, out TextBlock text)
+        {
             Grid root = new Grid();
-
-            Border wash = new Border { CornerRadius = new CornerRadius(4), Opacity = 0.82 };
-            wash.SetResourceReference(Border.BackgroundProperty, "ChromeBrush");
-            root.Children.Add(wash);
-
-            Border frame = new Border { BorderThickness = new Thickness(2), CornerRadius = new CornerRadius(4), Margin = new Thickness(1) };
-            frame.SetResourceReference(Border.BorderBrushProperty, "AccentBrush");
-            root.Children.Add(frame);
-
-            Canvas corners = new Canvas();
-            root.Children.Add(corners);
-            SizeChanged += delegate { DrawCorners(corners); };
-
-            TextBlock text = new TextBlock
+            root.Children.Add(new Border { Background = Ui.B("B.OverlayDim") });
+            outline = new Border { Margin = new Thickness(4), CornerRadius = new CornerRadius(3) };
+            root.Children.Add(outline);
+            text = new TextBlock { Text = label, FontSize = 16, FontWeight = FontWeights.ExtraBold, TextTrimming = TextTrimming.CharacterEllipsis };
+            chip = new Border
             {
-                Text = label.ToUpperInvariant(),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                TextAlignment = TextAlignment.Center,
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                Margin = new Thickness(24)
+                HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(14),
+                CornerRadius = new CornerRadius(3), Padding = new Thickness(8, 3, 8, 4), Child = text
             };
-            text.SetResourceReference(FrameworkElement.StyleProperty, "Desk.Text.InspectorHeading");
-            root.Children.Add(text);
-
-            Content = root;
+            root.Children.Add(chip);
+            Paint(false, outline, chip, text);
+            return root;
         }
 
-        static void DrawCorners(Canvas corners)
+        public static void Paint(bool lit, Border outline, Border chip, TextBlock text)
         {
-            corners.Children.Clear();
-            double w = corners.ActualWidth, h = corners.ActualHeight;
-            if (w <= 0 || h <= 0) return;
-            double length = Math.Max(4, Math.Min(24, Math.Min(w, h) / 6));
-            AddCorner(corners, 1, 1, length, 0, 0, length);
-            AddCorner(corners, w - 1, 1, -length, 0, 0, length);
-            AddCorner(corners, 1, h - 1, length, 0, 0, -length);
-            AddCorner(corners, w - 1, h - 1, -length, 0, 0, -length);
+            outline.BorderThickness = new Thickness(lit ? 3 : 2);
+            outline.BorderBrush = Ui.B(lit ? "B.Selection" : "B.OverlayLine");
+            outline.Background = lit ? Ui.B("B.OverlayLit") : null;
+            chip.Background = Ui.B(lit ? "B.Selection" : "B.Zone");
+            text.Foreground = Ui.B(lit ? "B.SelectionInk" : "B.Ink");
         }
 
-        static void AddCorner(Canvas host, double x, double y, double dx1, double dy1, double dx2, double dy2)
+        bool lit;
+        public bool Lit
         {
-            Path path = new Path { StrokeThickness = 3, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round };
-            path.SetResourceReference(Shape.StrokeProperty, "AccentBrush");
-            PathFigure figure = new PathFigure { StartPoint = new System.Windows.Point(x + dx1, y + dy1) };
-            figure.Segments.Add(new LineSegment(new System.Windows.Point(x, y), true));
-            figure.Segments.Add(new LineSegment(new System.Windows.Point(x + dx2, y + dy2), true));
-            PathGeometry geometry = new PathGeometry();
-            geometry.Figures.Add(figure);
-            path.Data = geometry;
-            host.Children.Add(path);
+            get { return lit; }
+            set { if (value == lit) return; lit = value; Paint(value, outline, chip, text); }
         }
 
         protected override void OnSourceInitialized(EventArgs e)

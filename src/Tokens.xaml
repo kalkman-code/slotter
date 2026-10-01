@@ -1,0 +1,107 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=mscorlib">
+
+  <!-- Margin, Slotter 1.0's design. Every colour, radius, size and face the app draws with
+       is named here by role and nowhere else, so a second design pack is a second copy of
+       this file with other values. Contrast ratios are measured in
+       docs/designs/designer-1.0/opus-notes.md. -->
+
+  <!-- Surfaces -->
+  <SolidColorBrush x:Key="B.Ground" Color="#1C1A17"/>
+  <SolidColorBrush x:Key="B.Ground2" Color="#221F1B"/>
+  <SolidColorBrush x:Key="B.Desk" Color="#2B2723"/>
+  <SolidColorBrush x:Key="B.Desk2" Color="#1D1B18"/>
+  <SolidColorBrush x:Key="B.DeskEdge" Color="#4A443C"/>
+  <SolidColorBrush x:Key="B.Drawer" Color="#141210"/>
+  <SolidColorBrush x:Key="B.Drawer2" Color="#1A1815"/>
+  <SolidColorBrush x:Key="B.Pull" Color="#4B453D"/>
+  <SolidColorBrush x:Key="B.Menu" Color="#221F1B"/>
+  <SolidColorBrush x:Key="B.MenuHover" Color="#2E2A25"/>
+  <SolidColorBrush x:Key="B.Sheet" Color="#1F1C19"/>
+  <SolidColorBrush x:Key="B.ListHover" Color="#28241F"/>
+  <SolidColorBrush x:Key="B.Scrim" Color="#BD0A0908"/>
+
+  <!-- Ink -->
+  <SolidColorBrush x:Key="B.Ink" Color="#F2ECE2"/>
+  <SolidColorBrush x:Key="B.Ink2" Color="#BFB5A6"/>
+  <SolidColorBrush x:Key="B.Ink3" Color="#A1978A"/>
+  <SolidColorBrush x:Key="B.OnInk" Color="#1C1A17"/>
+
+  <!-- Selection is the only use of the accent: selected zone, active tab, selected program,
+       highlighted menu row, the zone under the cursor while snapping. -->
+  <SolidColorBrush x:Key="B.Selection" Color="#F5C518"/>
+  <SolidColorBrush x:Key="B.SelectionInk" Color="#1C1A17"/>
+
+  <SolidColorBrush x:Key="B.Error" Color="#FF9A86"/>
+  <SolidColorBrush x:Key="B.ErrorWash" Color="#2A1714"/>
+
+  <!-- Rules and controls -->
+  <SolidColorBrush x:Key="B.Rule" Color="#35302A"/>
+  <SolidColorBrush x:Key="B.Field" Color="#24211D"/>
+  <SolidColorBrush x:Key="B.FieldBorder" Color="#736A5E"/>
+  <SolidColorBrush x:Key="B.PrimaryOff" Color="#3A352F"/>
+  <SolidColorBrush x:Key="B.SwitchOff" Color="#5B544A"/>
+  <SolidColorBrush x:Key="B.Thumb" Color="#4B453D"/>
+
+  <!-- The desk: monitors drawn as objects -->
+  <SolidColorBrush x:Key="B.Bezel" Color="#0B0A09"/>
+  <SolidColorBrush x:Key="B.BezelTop" Color="#1B1916"/>
+  <SolidColorBrush x:Key="B.BezelEdge" Color="#4B453D"/>
+  <SolidColorBrush x:Key="B.Screen" Color="#1A1815"/>
+  <SolidColorBrush x:Key="B.ScreenTop" Color="#211E1A"/>
+  <SolidColorBrush x:Key="B.ScreenOff" Color="#070606"/>
+  <SolidColorBrush x:Key="B.ScreenUnused" Color="#141210"/>
+  <SolidColorBrush x:Key="B.Stand" Color="#2A2622"/>
+  <SolidColorBrush x:Key="B.StandHi" Color="#443E37"/>
+  <SolidColorBrush x:Key="B.StandShade" Color="#1F1C19"/>
+  <SolidColorBrush x:Key="B.FootEdge" Color="#4F483F"/>
+  <SolidColorBrush x:Key="B.Zone" Color="#2D2A25"/>
+  <SolidColorBrush x:Key="B.ZoneLine" Color="#4F483F"/>
+  <SolidColorBrush x:Key="B.ZoneHover" Color="#6E665B"/>
+  <SolidColorBrush x:Key="B.ZoneChip" Color="#403A33"/>
+  <SolidColorBrush x:Key="B.ZoneEmpty" Color="#1C1A17"/>
+  <SolidColorBrush x:Key="B.ZoneEmptyLine" Color="#6F675C"/>
+  <SolidColorBrush x:Key="B.ZoneOfflineLine" Color="#5B544A"/>
+  <SolidColorBrush x:Key="B.ZoneFault" Color="#2A1A16"/>
+
+  <!-- The snap overlay, drawn over the real desktop -->
+  <SolidColorBrush x:Key="B.OverlayDim" Color="#9E0A0908"/>
+  <SolidColorBrush x:Key="B.OverlayLine" Color="#8CF2ECE2"/>
+  <SolidColorBrush x:Key="B.OverlayLit" Color="#29F5C518"/>
+
+  <!-- Radii -->
+  <CornerRadius x:Key="R.Control">4</CornerRadius>
+  <CornerRadius x:Key="R.Small">3</CornerRadius>
+  <CornerRadius x:Key="R.Picker">5</CornerRadius>
+  <CornerRadius x:Key="R.Menu">6</CornerRadius>
+  <CornerRadius x:Key="R.Tab">5,5,0,0</CornerRadius>
+  <CornerRadius x:Key="R.Sheet">0,0,8,8</CornerRadius>
+  <CornerRadius x:Key="R.Pill">14</CornerRadius>
+  <sys:Double x:Key="R.Monitor">6</sys:Double>
+  <sys:Double x:Key="R.Zone">3</sys:Double>
+
+  <!-- Spacing -->
+  <sys:Double x:Key="S.Margin">32</sys:Double>
+  <sys:Double x:Key="S.MarginNarrow">14</sys:Double>
+  <sys:Double x:Key="S.Column">24</sys:Double>
+  <sys:Double x:Key="S.Gap">8</sys:Double>
+
+  <!-- Type. WPF groups these static cuts by their WWS family names, which carry the optical
+       size: "Bricolage Grotesque" alone matches nothing and falls back to Segoe UI. -->
+  <FontFamily x:Key="Font.UI">pack://application:,,,/Slotter;component/fonts/#Bricolage Grotesque 14pt</FontFamily>
+  <FontFamily x:Key="Font.Display">pack://application:,,,/Slotter;component/fonts/#Bricolage Grotesque Display 96pt</FontFamily>
+  <sys:Double x:Key="T.Title">32</sys:Double>
+  <sys:Double x:Key="T.Heading">20</sys:Double>
+  <sys:Double x:Key="T.HeadingNarrow">16</sys:Double>
+  <sys:Double x:Key="T.Picker">16</sys:Double>
+  <sys:Double x:Key="T.Tab">14</sys:Double>
+  <sys:Double x:Key="T.Body">13</sys:Double>
+  <sys:Double x:Key="T.Small">12</sys:Double>
+  <sys:Double x:Key="T.Caption">11</sys:Double>
+  <sys:Double x:Key="T.Tag">11</sys:Double>
+
+  <!-- The one soft shadow, for floating things only: sheet, menus, toasts, the rename callout -->
+  <DropShadowEffect x:Key="Shadow" BlurRadius="36" ShadowDepth="14" Direction="270" Opacity="0.5" Color="Black"/>
+
+</ResourceDictionary>

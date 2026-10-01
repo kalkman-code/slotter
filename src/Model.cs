@@ -6,7 +6,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
 
-namespace Snappy
+namespace Slotter
 {
     // A rectangular slot on a monitor, as a percentage of that monitor's working area.
     public class Zone
@@ -58,7 +58,7 @@ namespace Snappy
 
     // profiles.ini read/write and the domain queries every window needs. Carried over
     // from the WinForms build untouched — this is a presentation-layer port, not a
-    // rewrite of what Snappy does.
+    // rewrite of what Slotter does.
     public static class Config
     {
         [DllImport("kernel32", CharSet = CharSet.Unicode)]
@@ -92,9 +92,9 @@ namespace Snappy
             try
             {
                 File.WriteAllText(IniPath, string.Join(Environment.NewLine, new string[] {
-                    "; Snappy config -- edit via the tray Settings window, or by hand here.",
+                    "; Slotter config -- edit via the tray Settings window, or by hand here.",
                     "; Zone<N> = Monitor,XPct,YPct,WPct,HPct   (percent of that monitor's work area, monitor is 1-based)",
-                    "; App<N>  = ExePath,Args,ZoneName          (Args may be blank; same exe may repeat)",
+                    "; Prog<N> = <program name from [Programs]>  (which program launches into Zone<N>)",
                     "[Profiles]",
                     "List=Example",
                     "",
@@ -108,9 +108,8 @@ namespace Snappy
                     "LastProfile=Example",
                     "",
                     "[Settings]",
-                    "StartWithWindows=1",
+                    "StartWithWindows=0",
                     "HotkeyEnabled=1",
-                    "Appearance=follow",
                     "",
                     "[Programs]",
                     "Count=2",
@@ -256,21 +255,17 @@ namespace Snappy
         }
 
         // A zone is keyed on the monitor's resolution, so the name comes from whichever attached
-        // screen currently has that size: the family's shared name for its EDID identity ("LG CX"),
-        // else the panel's own EDID name. A remote session or a display that is away has no identity,
-        // so it reads as the resolution rather than borrowing another panel's name.
+        // screen currently has that size. A display that is away is named from [Monitors], what
+        // Slotter saw when it was last connected, else its resolution.
         public static string MonitorLabel(string monKey)
         {
             if (string.IsNullOrEmpty(monKey)) return "RDP";
             foreach (Screen screen in Screen.AllScreens)
             {
                 if (screen.Bounds.Width + "x" + screen.Bounds.Height != monKey) continue;
-                string identity, edidName;
-                if (Ykit.DeskDisplayIdentity.ForDevice(screen.DeviceName, out identity, out edidName))
-                    return Ykit.DeskDisplayNames.NameFor(identity, edidName.Length > 0 ? edidName : monKey);
-                return SystemInformation.TerminalServerSession ? "RDP" : monKey;
+                return DisplayNames.For(screen.DeviceName, SystemInformation.TerminalServerSession ? "RDP" : monKey);
             }
-            return monKey;
+            return Monitors.Label(monKey);
         }
 
         public static bool ProfileVisible(Profile p, Screen[] screens)
@@ -278,25 +273,6 @@ namespace Snappy
             if (p.Zones.Count == 0) return true;
             foreach (Zone z in p.Zones) if (ResolveScreenIndex(z, screens) < 0) return false;
             return true;
-        }
-
-        public static string ProfileMonitorLabel(Profile p, Screen[] screens)
-        {
-            List<string> labels = new List<string>();
-            foreach (Zone z in p.Zones)
-            {
-                string key = z.MonKey;
-                if (string.IsNullOrEmpty(key))
-                {
-                    int idx = ResolveScreenIndex(z, screens);
-                    if (idx >= 0) key = screens[idx].Bounds.Width + "x" + screens[idx].Bounds.Height;
-                }
-                string label = MonitorLabel(key);
-                if (!labels.Contains(label)) labels.Add(label);
-            }
-            if (labels.Count == 0) return "Unassigned";
-            labels.Sort(StringComparer.OrdinalIgnoreCase);
-            return string.Join(" + ", labels.ToArray());
         }
     }
 }

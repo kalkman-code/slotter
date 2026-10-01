@@ -1,6 +1,6 @@
-# Snappy for macOS
+# Slotter for macOS
 
-A native Swift/AppKit port of Snappy. It does two jobs: it launches a saved **workspace** — each
+A native Swift/AppKit port of Slotter. It does two jobs: it launches a saved **workspace** — each
 app into its own zone — and it is a complete **keyboard window manager** with Magnet's shortcut
 set. It lives in the menu bar and has no Dock icon.
 
@@ -10,26 +10,28 @@ set. It lives in the menu bar and has no Dock icon.
 ./build.sh --install
 ```
 
-Compiles with SwiftPM, assembles `Snappy.app` by hand, generates the icon from code, signs, then
-installs to `/Applications` and launches it. Drop `--install` to build without installing.
+Compiles with SwiftPM, assembles `Slotter.app` by hand, renders the icon from `../Slotter.svg`, copies
+Bricolage Grotesque from `../fonts` into `Resources/Fonts` (registered at launch), signs, then
+installs to `/Applications`, relaunching only if it was already running, and removes a
+left-over `Snappy.app`. Drop `--install` to build without installing.
 
 `build.sh` **refuses to ad-hoc sign.** macOS binds the Accessibility grant to the code signature,
 so an ad-hoc build would lose that permission on every rebuild and you would be re-granting it all
-day. Override the identity with `SNAPPY_SIGN_IDENTITY` if the certificate ever changes.
+day. Override the identity with `SLOTTER_SIGN_IDENTITY` if the certificate ever changes.
 
 Run the tests with `swift test`.
 
-`open -a Snappy --args --settings` opens the designer directly, matching the Windows build's
-`Snappy.exe --settings`. If Snappy is already running it raises the existing window rather than
+`open -a Slotter --args --settings` opens the designer directly, matching the Windows build's
+`Slotter.exe --settings`. If Slotter is already running it raises the existing window rather than
 starting a second copy.
 
 ## Accessibility
 
-Snappy needs one permission and asks for nothing else. macOS only lets an app move another app's
+Slotter needs one permission and asks for nothing else. macOS only lets an app move another app's
 windows through the Accessibility API, so without the grant the app runs but every snap is a no-op.
 First launch shows an explainer before anything system-level opens.
 
-If the grant ever gets into a confused state: `tccutil reset Accessibility com.tobykalkman.snappy`.
+If the grant ever gets into a confused state: `tccutil reset Accessibility uk.co.kalkman.slotter`.
 
 ## Keyboard
 
@@ -82,8 +84,8 @@ too quick to preview still lands where you dropped it.
 
 ## Config
 
-`~/Library/Application Support/Snappy/profiles.ini` — hand-editable, and edits are picked up live.
-Comments, blank lines and any keys Snappy does not recognise survive a save untouched.
+`~/Library/Application Support/Slotter/profiles.ini` — hand-editable, and edits are picked up live.
+Comments, blank lines and any keys Slotter does not recognise survive a save untouched.
 
 ```ini
 [Profiles]  List=Coding,Writing
@@ -107,10 +109,11 @@ nothing is shared with the Windows build.
 
 ## Layout
 
-- `Sources/SnappyKit` — domain and platform. No windows, unit-testable.
-- `Sources/SnappyUI` — design system and every window.
-- `Sources/Snappy` — the executable and `AppController`.
-- `Sources/SnappyIconGen` — build-time tool that draws the icon.
+- `Sources/SlotterKit` — domain and platform. No windows, unit-testable.
+- `Sources/SlotterUI` — every window. All colours, radii, spacing and type sizes live in one design pack
+  (`DesignPack.swift`, values in `MarginPack.swift`); another look is another pack, not a view edit.
+- `Sources/Slotter` — the executable and `AppController`.
+- `Sources/SlotterIconGen` — build-time tool that draws the icon.
 
 Three rules the code holds to:
 
@@ -137,7 +140,6 @@ config and re-registers when it has been lost.
 The Windows build reopens the last workspace's zones on every start; the Mac build deliberately
 does not (see Dragging).
 
-Added: the Magnet keyboard layer, drag-to-edge snapping, dark mode, and motion. The Windows build
-has no animation at all and no hover feedback on the zone you are about to drop into.
+Added: the Magnet keyboard layer, drag-to-edge snapping, and motion.
 
 Toasts sit top-right under the menu bar rather than bottom-right.

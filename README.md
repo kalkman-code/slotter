@@ -1,36 +1,82 @@
-# Snappy 2.0
+<p align="center"><img src="Slotter.svg" width="96" height="96" alt=""></p>
+<h1 align="center">Slotter</h1>
+<p align="center">Design your desk once, then open every app into its own slot on every monitor with one click.</p>
 
-Snappy opens a Windows workspace and places each app into its saved screen zone. It runs from the tray, built on .NET 10 + WPF and wearing the shared Y-family "Desk" design ([`ykit/docs/desk-design-system.md`](../ykit/docs/desk-design-system.md)).
+Slotter keeps named **workspaces**. A workspace is a set of **zones**, rectangles on your
+monitors, and each zone can name the app that opens into it. Launch a workspace from the tray
+(Windows) or the menu bar (macOS) and Slotter opens each app and places it in its zone, then tells
+you how many landed. A zone with no app is still a slot: drag any window by its title bar and the
+workspace's zones appear, and dropping the window in one snaps it there.
 
-There is a native macOS port in [`mac/`](mac/README.md) — Swift/AppKit, menu bar, same workspace model, plus a full Magnet-compatible keyboard layer, also on the Desk design. The two builds share no code and keep their own profiles.
+Window snappers such as FancyZones and Magnet arrange windows you have already opened. Slotter
+also does the opening, so a workspace is a desk you can get back in one action.
 
-## Use Snappy
+## Use it
 
-- Click the tray icon to launch a workspace, open Settings, or manage open app windows.
-- Press `Ctrl + Alt + Space` to launch the last workspace. You can turn the shortcut off from the tray or Settings.
-- Drag any app by its title bar to reveal the active workspace's zones, then release inside a zone to snap it there. Assigned and unassigned zones are both available.
-- Snappy confirms each launch and reports how many apps reached their zones.
+- **Left click** the tray or menu bar icon to open the designer. **Right click** for the menu:
+  launch a workspace, start at login, window controls, quit.
+- On Windows, `Ctrl + Alt + Space` launches the last workspace. It can be turned off, and the
+  designer says when another app already holds it.
+- Dragging a window by its title bar shows the active workspace's zones; release inside one to
+  snap the window there.
+- **Close every open app** asks visible apps to close. **Force close every open app** ends them
+  after a warning, because unsaved work is lost.
 
-`Close every open app` asks visible apps to close. `Force close every open app` shows a warning before ending their processes because unsaved work can be lost.
+## Design a workspace
 
-## Set up a workspace
+The designer draws your monitors as they stand on the desk, at their real size, with the selected
+workspace's zones on them. Pick a workspace from the tabs across the top, click a zone, and the
+drawer underneath edits it: the app it opens, its position and size as percentages of the screen,
+split it, delete it, or apply one of nine layouts to the whole monitor. **Manage programs…**
+defines each app once (name, program or `.app`, optional arguments); renaming one updates every
+zone that uses it. Edits are staged until you **Save changes**, and anything that would not work,
+such as a zone running off the edge of its screen, blocks the save and says where.
 
-Open **Settings** from the tray. Add a workspace, select a monitor, and choose a preset or split an existing zone. Assign a program when Snappy should launch it automatically, or leave the zone empty to use it as a manual snap target, then save changes.
+A workspace for a monitor that is not connected stays listed and editable, marked offline.
 
-Use **Manage programs** to define each executable or shortcut once. Renaming a program updates every zone that uses it. Chrome workspaces should include `--new-window` in the program arguments when each zone needs a separate browser window.
+## Permissions
 
-Snappy stores workspaces and programs in `profiles.ini` beside the executable. The Settings window validates names and zone geometry before saving.
+- **Windows**: Slotter asks to run as administrator (one UAC prompt) because Windows only lets an
+  elevated app move an elevated window, such as Task Manager or an admin terminal.
+- **macOS**: Slotter needs Accessibility permission to move other apps' windows and asks for
+  nothing else. It never reads window contents or keystrokes. macOS also gets Magnet-compatible
+  keyboard shortcuts for halves, thirds, quarters and moving between displays; see
+  [`mac/README.md`](mac/README.md).
 
-## Build and run
+## Configuration
 
-Run:
+Everything lives in a plain `profiles.ini`: `%LOCALAPPDATA%\Slotter\profiles.ini` on Windows,
+`~/Library/Application Support/Slotter/profiles.ini` on macOS. It is safe to edit by hand, and
+the macOS build picks edits up live. Monitors are named from their own EDID; to call one
+something else on Windows, add a line under `[Displays]` keyed by the display's EDID identity,
+such as `GSMC0C8-UID4352=Left screen`. The designer draws monitors at their real size
+when they report it; TVs often do not, so give a diagonal in inches under `[DisplaySizes]`, keyed by
+the name the designer shows, such as `LG TV SSCR2=48`. Coming from Snappy, Slotter's name before 1.0: the first run
+carries your workspaces over.
+
+## Build from source
+
+**Windows** (Windows 10 or 11, .NET 10 SDK):
 
 ```powershell
 .\install.ps1
 ```
 
-This builds a self-contained `Snappy.exe` with `dotnet publish` (see `build.ps1`), installs it to `%LOCALAPPDATA%\Snappy`, creates the Start Menu, desktop and taskbar entries, seeds `profiles.ini` on first install only, and never adds an autostart entry on its own — Snappy asks for that from its own tray menu.
+This publishes a self-contained `Slotter.exe`, installs it to `%LOCALAPPDATA%\Slotter`, adds a
+Start Menu entry and nothing else: no desktop shortcut, and no autostart unless you turn on
+**Start with Windows** in Slotter itself.
 
-Per-monitor DPI awareness is declared in `app.manifest` (`dpiAwareness = PerMonitorV2`); WPF lays out in device-independent units, so there is no manual scaling code anywhere in the app — the `S()`/`k` scaling apparatus the WinForms build needed is gone entirely.
+**macOS** (macOS 14 or later, Xcode command line tools):
 
-Snappy uses DWM frame compensation so visible window edges meet the saved zone boundaries. It applies placement twice for terminals and Electron apps that resize after opening. It self-elevates on launch (UAC) because snapping an admin window requires Snappy to run elevated too.
+```sh
+cd mac && ./build.sh --install
+```
+
+This builds, signs with your Apple Development identity (set `SLOTTER_SIGN_IDENTITY`), and
+installs to `/Applications/Slotter.app`. Run it from Terminal rather than over SSH: signing needs
+the login keychain unlocked. macOS ties the Accessibility grant to the signature, so an ad-hoc
+signature would drop it on every rebuild.
+
+The two builds share no code: Windows is .NET 10 and WPF in `src/`, macOS is Swift, AppKit and
+SwiftUI in `mac/`. Both wear the same design, set in Bricolage Grotesque (SIL Open Font Licence,
+in `fonts/`).

@@ -8,7 +8,7 @@ using System.Windows;
 using System.Windows.Forms;
 using System.Windows.Threading;
 
-namespace Snappy
+namespace Slotter
 {
     // Manual drag-snap: while the active workspace's zones are live, dragging a
     // window's title bar shows every zone as an overlay and releasing inside one
@@ -57,6 +57,9 @@ namespace Snappy
         int retryAttempts;
         readonly List<SnapTarget> targets = new List<SnapTarget>();
         readonly List<SnapOverlay> overlays = new List<SnapOverlay>();
+        // The move-size events say only when a drag starts and ends, so the zone under the
+        // cursor is found by polling while the overlays are up.
+        readonly DispatcherTimer track;
 
         public SnapEngine(Func<Profile> activeProfile)
         {
@@ -66,6 +69,18 @@ namespace Snappy
             timeout.Tick += delegate { CloseTargets(); };
             retry = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
             retry.Tick += delegate { RetrySnap(); };
+            track = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(40) };
+            track.Tick += delegate { LightTarget(); };
+        }
+
+        void LightTarget()
+        {
+            System.Drawing.Point cursor;
+            if (!TryGetCursor(out cursor)) return;
+            int hit = -1;
+            for (int i = targets.Count - 1; i >= 0; i--)
+                if (targets[i].Bounds.Contains(cursor)) { hit = i; break; }
+            for (int i = 0; i < overlays.Count; i++) overlays[i].Lit = i == hit;
         }
 
         public void Start()
@@ -88,11 +103,13 @@ namespace Snappy
             if (eventsRoot.IsAllocated) eventsRoot.Free();
             timeout.Stop();
             retry.Stop();
+            track.Stop();
         }
 
         public void CloseTargets()
         {
             timeout.Stop();
+            track.Stop();
             foreach (SnapOverlay overlay in overlays)
             {
                 try { overlay.Close(); }
@@ -143,7 +160,7 @@ namespace Snappy
                 // A zone on a disconnected monitor would fall back to monitor 1 and
                 // shadow the real zones there - leave it out of the drag targets.
                 if (Config.ResolveScreenIndex(zone, screens) < 0) continue;
-                string label = string.IsNullOrEmpty(zone.Prog) ? "Zone " + (i + 1) + " - ready for any app" : "Zone " + (i + 1) + " - " + zone.Prog;
+                string label = (i + 1) + "  " + (string.IsNullOrEmpty(zone.Prog) ? "Empty" : zone.Prog);
                 Rectangle bounds = ZoneBounds(zone);
                 targets.Add(new SnapTarget { Bounds = bounds, Label = label });
                 SnapOverlay overlay = new SnapOverlay(bounds, label);
@@ -152,6 +169,8 @@ namespace Snappy
             }
             timeout.Stop();
             timeout.Start();
+            LightTarget();
+            track.Start();
         }
 
         void ApplyTarget(IntPtr hwnd, uint eventTime)
@@ -250,7 +269,7 @@ namespace Snappy
             return cls != "Shell_TrayWnd" && cls != "Shell_SecondaryTrayWnd" && cls != "Progman" && cls != "WorkerW";
         }
 
-        // Top-level user application windows (not the shell, tray, owned dialogs, or Snappy).
+        // Top-level user application windows (not the shell, tray, owned dialogs, or Slotter).
         public static List<IntPtr> UserWindows()
         {
             int self = Process.GetCurrentProcess().Id;

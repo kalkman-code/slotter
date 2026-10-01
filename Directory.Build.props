@@ -1,9 +1,9 @@
 <Project>
   <!-- Build output lives outside the repo. The hub is a Syncthing share, and a
-       versioned copy of Snappy.exe in .stversions is what a startup shortcut could
+       versioned copy of Slotter.exe in .stversions is what a startup shortcut could
        end up pointing at. Nothing built may stay here. -->
   <PropertyGroup>
-    <BaseOutputPath>$(LOCALAPPDATA)\Y-Family-build\snappy\bin\</BaseOutputPath>
-    <BaseIntermediateOutputPath>$(LOCALAPPDATA)\Y-Family-build\snappy\obj\</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(LOCALAPPDATA)\Slotter-build\bin\</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(LOCALAPPDATA)\Slotter-build\obj\</BaseIntermediateOutputPath>
   </PropertyGroup>
 </Project>

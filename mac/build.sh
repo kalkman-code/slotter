@@ -3,10 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-IDENTITY="${SNAPPY_SIGN_IDENTITY:-Apple Development: Created via API (DL3YV3TC36)}"
-BUNDLE_ID="com.tobykalkman.snappy"
-APP="build/Snappy.app"
-INSTALL_PATH="/Applications/Snappy.app"
+IDENTITY="${SLOTTER_SIGN_IDENTITY:-Apple Development: Created via API (DL3YV3TC36)}"
+BUNDLE_ID="uk.co.kalkman.slotter"
+APP="build/Slotter.app"
+INSTALL_PATH="/Applications/Slotter.app"
+OLD_APP="/Applications/Snappy.app"
 
 INSTALL=0
 for arg in "$@"; do
@@ -20,20 +21,24 @@ echo "==> toolchain"
 swift --version | awk 'NR==1'
 
 echo "==> build"
-swift build -c release --product Snappy
-swift build -c release --product snappy-icongen
+swift build -c release --product Slotter
+swift build -c release --product slotter-icongen
 BIN="$(swift build -c release --show-bin-path)"
 
 echo "==> assemble"
-rm -rf "$APP" build/Snappy.iconset
+rm -rf "$APP" build/Slotter.iconset
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BIN/Snappy" "$APP/Contents/MacOS/Snappy"
+cp "$BIN/Slotter" "$APP/Contents/MacOS/Slotter"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+echo "==> fonts"
+mkdir -p "$APP/Contents/Resources/Fonts"
+cp ../fonts/*.ttf ../fonts/OFL.txt "$APP/Contents/Resources/Fonts/"
+
 echo "==> icon"
-"$BIN/snappy-icongen" ../Snappy.svg build/Snappy.iconset
-iconutil -c icns -o "$APP/Contents/Resources/Snappy.icns" build/Snappy.iconset
+"$BIN/slotter-icongen" ../Slotter.svg build/Slotter.iconset
+iconutil -c icns -o "$APP/Contents/Resources/Slotter.icns" build/Slotter.iconset
 
 echo "==> sign"
 if ! security find-identity -v -p codesigning | grep -qF "$IDENTITY"; then
@@ -43,32 +48,39 @@ if ! security find-identity -v -p codesigning | grep -qF "$IDENTITY"; then
 fi
 codesign --force --sign "$IDENTITY" \
          --identifier "$BUNDLE_ID" \
-         --entitlements Snappy.entitlements \
+         --entitlements Slotter.entitlements \
          "$APP"
 codesign --verify --strict "$APP"
 codesign -dvv "$APP" 2>&1 | grep -E '^(Identifier|Authority|TeamIdentifier)' || true
 
 if [ "$INSTALL" -eq 1 ]; then
     echo "==> install"
-# Installing is not a reason to put a window on screen (Toby, 16-09-2026).
-# The app comes back only if it was already open — that restores what the
-# quit below takes away — and INSTALL_NO_LAUNCH suppresses even that.
-WAS_RUNNING=""
-if pgrep -f "${INSTALL_PATH}/Contents/MacOS/" >/dev/null 2>&1; then WAS_RUNNING=1; fi
-relaunch() {
-  if [ -z "$WAS_RUNNING" ] || [ -n "${INSTALL_NO_LAUNCH:-}" ]; then
-    echo "Installed. Not launched - it was not running."
-    return 0
-  fi
-  open "$@"
-}
+    # Installing is not a reason to put a window on screen. The app comes back only if it
+    # (or Snappy, its name before 1.0) was already open, and INSTALL_NO_LAUNCH suppresses even that.
+    WAS_RUNNING=""
+    if pgrep -f "${INSTALL_PATH}/Contents/MacOS/" >/dev/null 2>&1 || pgrep -x Snappy >/dev/null 2>&1; then WAS_RUNNING=1; fi
 
-    osascript -e 'quit app "Snappy"' >/dev/null 2>&1 || pkill -x Snappy || true
+    osascript -e 'quit app "Slotter"' >/dev/null 2>&1 || pkill -x Slotter || true
     sleep 1
     rm -rf "$INSTALL_PATH"
     ditto "$APP" "$INSTALL_PATH"
-    relaunch "$INSTALL_PATH"
-    [ -n "$WAS_RUNNING" ] && echo "installed and launched $INSTALL_PATH" || true
+    # Nothing built stays in the repo: Spotlight would list the staged copy beside the real one.
+    rm -rf build
+
+    # Retire Snappy only once Slotter is on disk.
+    if [ -d "$OLD_APP" ]; then
+        osascript -e 'quit app "Snappy"' >/dev/null 2>&1 || pkill -x Snappy || true
+        sleep 1
+        rm -rf "$OLD_APP"
+        echo "removed $OLD_APP"
+    fi
+
+    if [ -n "$WAS_RUNNING" ] && [ -z "${INSTALL_NO_LAUNCH:-}" ]; then
+        open "$INSTALL_PATH"
+        echo "installed and launched $INSTALL_PATH"
+    else
+        echo "installed $INSTALL_PATH - not launched, it was not running"
+    fi
 else
     echo "built $PWD/$APP  (pass --install to install to /Applications)"
 fi

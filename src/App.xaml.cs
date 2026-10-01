@@ -10,13 +10,12 @@ using System.Windows.Interop;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
-using Ykit;
 
-namespace Snappy
+namespace Slotter
 {
     public partial class App : Application
     {
-        public const string Version = "2.0";
+        public const string Version = "1.0";
 
         const int HWND_BROADCAST = 0xffff;
         const int CmdSettings = 1;
@@ -28,14 +27,14 @@ namespace Snappy
         static uint commandMessage;
         Mutex instance;
         HwndSource messages;
-        DeskTray tray;
+        Tray tray;
         SnapEngine snapEngine;
-        SettingsWindow settingsWindow;
+        DesignerWindow settingsWindow;
 
         List<Profile> profiles = new List<Profile>();
         List<ProgItem> programsLib = new List<ProgItem>();
         string activeProfile = "";
-        bool startWithWindows = true;
+        bool startWithWindows;
         bool hotkeyEnabled = true;
         bool hotkeyReady;
         int launching;
@@ -51,15 +50,14 @@ namespace Snappy
         protected override void OnStartup(StartupEventArgs e)
         {
             base.OnStartup(e);
-            Ykit.DeskDisplayNames.SeedFromWallyOnce();
             string[] args = e.Args;
 
-            commandMessage = RegisterWindowMessage("SnappyCommand");
+            commandMessage = RegisterWindowMessage("SlotterCommand");
 
             // Already running: hand a --settings request to it rather than starting a
             // second instance, otherwise just exit quietly.
             Mutex existing;
-            if (Mutex.TryOpenExisting("SnappySingleInstance", out existing))
+            if (Mutex.TryOpenExisting("SlotterSingleInstance", out existing))
             {
                 existing.Dispose();
                 bool wantsSettings = args.Length > 0 && string.Equals(args[0], "--settings", StringComparison.OrdinalIgnoreCase);
@@ -68,7 +66,7 @@ namespace Snappy
                 return;
             }
 
-            // Snappy must run elevated to snap elevated windows (UIPI denies
+            // Slotter must run elevated to snap elevated windows (UIPI denies
             // SetWindowPos upward). Relaunch under UAC before anything else opens, so
             // the single-instance mutex below is the elevated instance.
             if (!Presence.IsElevated())
@@ -88,7 +86,7 @@ namespace Snappy
             }
 
             bool createdNew;
-            instance = new Mutex(true, "SnappySingleInstance", out createdNew);
+            instance = new Mutex(true, "SlotterSingleInstance", out createdNew);
             if (!createdNew) { instance.Dispose(); instance = null; Shutdown(); return; }
 
             DispatcherUnhandledException += delegate(object s, DispatcherUnhandledExceptionEventArgs ex)
@@ -101,17 +99,19 @@ namespace Snappy
                 Log.Write("error: " + ex.ExceptionObject);
             };
 
-            DeskTheme.Install(this);
+            Ui.Install(Resources);
             Log.Write("start " + Version + ": " + AppContext.BaseDirectory + ", elevated=" + Presence.IsElevated());
             LoadIcons();
             OpenMessageWindow();
 
             Config.EnsureDefault();
             LoadConfig();
+            Monitors.Remember();
 
             if (!Presence.IsElevated())
-                Toast.Show("Snappy is running un-elevated", "Admin windows (Task Manager, Hyper-V, elevated terminals) will not snap until Snappy runs elevated.", false);
+                Toast.Show("Slotter is running un-elevated", "Admin windows (Task Manager, Hyper-V, elevated terminals) will not snap until Slotter runs elevated.", false);
 
+            Presence.RetireSnappy();
             Presence.ApplyStartupSetting(startWithWindows);
             ApplyHotkeySetting();
 
@@ -129,7 +129,7 @@ namespace Snappy
         {
             try
             {
-                Uri uri = new Uri("pack://application:,,,/Snappy.ico", UriKind.Absolute);
+                Uri uri = new Uri("pack://application:,,,/Slotter.ico", UriKind.Absolute);
                 WindowIcon = BitmapFrame.Create(uri);
                 System.Windows.Resources.StreamResourceInfo info = GetResourceStream(uri);
                 if (info != null) TrayIcon = new System.Drawing.Icon(info.Stream, 32, 32);
@@ -143,7 +143,7 @@ namespace Snappy
         // holds the global hotkey.
         void OpenMessageWindow()
         {
-            HwndSourceParameters p = new HwndSourceParameters("SnappyCommands");
+            HwndSourceParameters p = new HwndSourceParameters("SlotterCommands");
             p.Width = 1;
             p.Height = 1;
             p.WindowStyle = 0;
@@ -188,6 +188,7 @@ namespace Snappy
             Dispatcher.BeginInvoke(new Action(delegate
             {
                 if (snapEngine != null) snapEngine.CloseTargets();
+                Monitors.Remember();
                 if (settingsWindow != null) settingsWindow.RefreshDisplays();
             }));
         }
@@ -199,7 +200,7 @@ namespace Snappy
             programsLib = Config.ReadPrograms();
             profiles = Config.ReadProfiles();
             activeProfile = Config.IniRead("Panel", "LastProfile", "");
-            startWithWindows = Config.IniRead("Settings", "StartWithWindows", "1") != "0";
+            startWithWindows = Config.IniRead("Settings", "StartWithWindows", "0") == "1";
             hotkeyEnabled = Config.IniRead("Settings", "HotkeyEnabled", "1") != "0";
             if (Config.FindProfile(profiles, activeProfile) == null)
                 activeProfile = profiles.Count > 0 ? profiles[0].Name : "";
@@ -209,7 +210,7 @@ namespace Snappy
 
         void BuildTray()
         {
-            tray = new DeskTray(TrayIcon, "Snappy — workspace launcher", messages.Handle);
+            tray = new Tray(TrayIcon, "Slotter", messages.Handle);
             tray.Opening += delegate { RebuildMenu(); };
             tray.PrimaryAction = OpenSettings;
         }
@@ -219,70 +220,83 @@ namespace Snappy
             ItemCollection items = tray.Menu.Items;
             items.Clear();
 
-            items.Add(DeskTray.Header("Snappy " + Version));
-            items.Add(DeskTray.Rule());
+            items.Add(Tray.Header("Slotter " + Version));
+            items.Add(Tray.Rule());
+            items.Add(Tray.Caption("Launch a workspace"));
 
             System.Windows.Forms.Screen[] screens = System.Windows.Forms.Screen.AllScreens;
-            int visible = 0;
             foreach (Profile p in profiles)
             {
-                if (!Config.ProfileVisible(p, screens)) continue;
-                visible++;
                 Profile captured = p;
-                bool active = string.Equals(p.Name, activeProfile, StringComparison.OrdinalIgnoreCase);
-                MenuItem item = DeskTray.Item(p.Name, Glyphs.Workspace, delegate { ActivateProfile(captured); });
-                if (active) item.FontWeight = System.Windows.FontWeights.SemiBold;
+                // A workspace whose monitor is away stays listed, greyed, with the reason in words.
+                if (!Config.ProfileVisible(p, screens))
+                {
+                    List<string> away = new List<string>();
+                    foreach (Zone z in p.Zones)
+                        if (Config.ResolveScreenIndex(z, screens) < 0)
+                        {
+                            string label = Config.MonitorLabel(z.MonKey);
+                            if (!away.Contains(label)) away.Add(label);
+                        }
+                    MenuItem off = Tray.Item(p.Name, string.Join(" + ", away.ToArray()) + " offline", null);
+                    off.IsEnabled = false;
+                    items.Add(off);
+                    continue;
+                }
+                int apps = 0;
+                foreach (Zone z in p.Zones) if (!string.IsNullOrEmpty(z.Prog)) apps++;
+                MenuItem item = Tray.Item(p.Name, apps == 0 ? "No apps" : apps == 1 ? "1 app" : apps + " apps", delegate { ActivateProfile(captured); });
+                if (string.Equals(p.Name, activeProfile, StringComparison.OrdinalIgnoreCase)) item.FontWeight = System.Windows.FontWeights.SemiBold;
                 items.Add(item);
             }
-            if (visible == 0)
+            if (profiles.Count == 0)
             {
-                MenuItem empty = DeskTray.Item("No workspaces yet", Glyphs.Workspace, null);
+                MenuItem empty = Tray.Item("No workspaces yet", null, null);
                 empty.IsEnabled = false;
                 items.Add(empty);
             }
-            items.Add(DeskTray.Rule());
+            items.Add(Tray.Rule());
 
-            items.Add(DeskTray.Item("Settings…", Glyphs.Settings, delegate { OpenSettings(); }));
+            items.Add(Tray.Item("Settings…", null, delegate { OpenSettings(); }));
 
-            items.Add(DeskTray.Toggle("Start with Windows", Glyphs.Startup, startWithWindows, delegate
+            items.Add(Tray.Toggle("Start with Windows", startWithWindows, delegate
             {
                 startWithWindows = !startWithWindows;
                 Config.IniWrite("Settings", "StartWithWindows", startWithWindows ? "1" : "0");
                 Presence.ApplyStartupSetting(startWithWindows);
             }));
 
-            MenuItem hotkey = DeskTray.Toggle(hotkeyEnabled && !hotkeyReady ? "Global shortcut unavailable" : "Global launch shortcut", Glyphs.Hotkey, hotkeyEnabled, delegate
+            MenuItem hotkey = Tray.Toggle(hotkeyEnabled && !hotkeyReady ? "Global shortcut unavailable" : "Global launch shortcut", hotkeyEnabled, delegate
             {
                 hotkeyEnabled = !hotkeyEnabled;
                 Config.IniWrite("Settings", "HotkeyEnabled", hotkeyEnabled ? "1" : "0");
                 ApplyHotkeySetting();
-                Toast.Show(hotkeyReady ? "Shortcut ready" : hotkeyEnabled ? "Shortcut unavailable" : "Shortcut disabled",
-                    hotkeyReady ? "Ctrl + Alt + Space launches the last workspace." : hotkeyEnabled ? "Another app is already using Ctrl + Alt + Space." : "You can re-enable it from this menu.",
-                    hotkeyReady);
+                if (settingsWindow != null) settingsWindow.HotkeyState(hotkeyReady);
+                Toast.Show(hotkeyReady ? "Shortcut ready" : hotkeyEnabled ? "Shortcut unavailable" : "Shortcut off",
+                    hotkeyReady ? "Ctrl + Alt + Space launches the last workspace." : hotkeyEnabled ? null : "You can turn it on again from this menu.",
+                    hotkeyReady, hotkeyEnabled && !hotkeyReady ? "Another app is already using Ctrl + Alt + Space." : null);
             });
-            if (hotkeyEnabled && !hotkeyReady) hotkey.SetResourceReference(MenuItem.ForegroundProperty, "DangerBrush");
+            if (hotkeyEnabled && !hotkeyReady) hotkey.Foreground = Ui.B("B.Error");
             items.Add(hotkey);
 
-            MenuItem windows = DeskTray.Item("Window controls", Glyphs.Windows, null);
-            windows.Items.Add(DeskTray.Item("Close every open app", Glyphs.Close, delegate
+            MenuItem windows = Tray.Item("Window controls", null, null);
+            windows.Items.Add(Tray.Item("Close every open app", null, delegate
             {
                 int count = LaunchEngine.CloseAllWindows();
                 Toast.Show("Close requested", count == 1 ? "1 app was asked to close." : count + " apps were asked to close.", true);
             }));
-            MenuItem force = DeskTray.Item("Force close every open app…", Glyphs.Kill, delegate
+            windows.Items.Add(Tray.Item("Force close every open app…", null, delegate
             {
                 List<IntPtr> targets = SnapEngine.UserWindows();
                 if (targets.Count == 0) { Toast.Show("Nothing to close", "No open app windows were found.", true); return; }
                 if (!Confirm.Ask(null, "Force close every open app?", "This immediately ends " + targets.Count + " visible app windows. Unsaved work can be lost.", "Force close apps", true)) return;
                 int count = LaunchEngine.ForceKillAll(targets);
                 Toast.Show("Apps force closed", count == 1 ? "1 app process was ended." : count + " app processes were ended.", false);
-            });
-            force.SetResourceReference(MenuItem.ForegroundProperty, "DangerBrush");
-            windows.Items.Add(force);
+            }));
             items.Add(windows);
 
-            items.Add(DeskTray.Rule());
-            items.Add(DeskTray.Item("Exit Snappy", Glyphs.Exit, delegate { Quit(); }));
+            items.Add(Tray.Rule());
+            items.Add(Tray.Item("Exit Slotter", null, delegate { Quit(); }));
         }
 
         // ---------------------------------------------------------------- launch
@@ -316,8 +330,9 @@ namespace Snappy
                 {
                     Dispatcher.BeginInvoke(new Action(delegate
                     {
-                        if (result.Placed == result.Planned) Toast.Show(p.Name + " is ready", result.Placed == 1 ? "1 app snapped into place." : result.Placed + " apps snapped into place.", true);
-                        else Toast.Show(p.Name + " launched with issues", result.Placed + " of " + result.Planned + " apps were placed. " + (result.FirstError ?? "Check snappy.log."), false);
+                        string placed = result.Placed + " of " + result.Planned + (result.Planned == 1 ? " app placed." : " apps placed.");
+                        if (result.Placed == result.Planned) Toast.Show(p.Name + " launched.", placed, true);
+                        else Toast.Show(p.Name + " launched.", placed, false, result.FirstError ?? "Check slotter.log.");
                     }));
                 }
                 catch { }
@@ -335,14 +350,14 @@ namespace Snappy
                 settingsWindow.Activate();
                 return;
             }
-            settingsWindow = new SettingsWindow(profiles, activeProfile, programsLib, startWithWindows, hotkeyEnabled, hotkeyReady);
+            settingsWindow = new DesignerWindow(profiles, activeProfile, programsLib, startWithWindows, hotkeyEnabled, hotkeyReady);
             settingsWindow.Saved += OnSettingsSaved;
             settingsWindow.Closed += delegate { settingsWindow = null; };
             settingsWindow.Show();
             settingsWindow.Activate();
         }
 
-        void OnSettingsSaved(List<Profile> editedProfiles, List<ProgItem> editedLibrary, string editedActive, bool editedStartup, bool editedHotkey)
+        bool OnSettingsSaved(List<Profile> editedProfiles, List<ProgItem> editedLibrary, string editedActive, bool editedStartup, bool editedHotkey)
         {
             bool savedProfiles = Config.SaveProfiles(editedProfiles);
             bool savedPrograms = Config.WritePrograms(editedLibrary);
@@ -354,9 +369,11 @@ namespace Snappy
                 LoadConfig();
                 Presence.ApplyStartupSetting(startWithWindows);
                 ApplyHotkeySetting();
-                Toast.Show("Settings saved", "Your workspaces are ready.", true);
+                if (settingsWindow != null) settingsWindow.HotkeyState(hotkeyReady);
+                return true;
             }
-            else Toast.Show("Settings could not be saved", "Check that Snappy can write to its folder.", false);
+            Toast.Show("Settings could not be saved", "Check that Slotter can write to its folder.", false);
+            return false;
         }
 
         // ------------------------------------------------------------------- exit

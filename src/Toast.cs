@@ -1,21 +1,21 @@
 using System;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Media;
-using System.Windows.Shapes;
 using System.Windows.Threading;
 
-namespace Snappy
+namespace Slotter
 {
-    // A short-lived panel in the corner of the working area, saying what just
-    // happened. Not a dialog: it never takes focus and never needs dismissing.
+    // A short-lived card in the corner of the working area saying what just happened. Not a
+    // dialog: it never takes focus and never needs dismissing.
     public sealed class Toast : Window
     {
         static Toast showing;
 
         readonly DispatcherTimer life = new DispatcherTimer();
 
-        Toast(string title, string detail, bool good)
+        Toast(string title, string detail, bool good, string problem)
         {
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
@@ -25,58 +25,64 @@ namespace Snappy
             Topmost = true;
             SizeToContent = SizeToContent.WidthAndHeight;
             ResizeMode = ResizeMode.NoResize;
-
-            Border shell = new Border();
-            shell.SetResourceReference(Border.BackgroundProperty, "PanelBrush");
-            shell.SetResourceReference(Border.BorderBrushProperty, "RuleBrush");
-            shell.BorderThickness = new Thickness(1);
-            shell.CornerRadius = new CornerRadius(10);
-            shell.Padding = new Thickness(16, 13, 20, 15);
-            shell.Effect = new System.Windows.Media.Effects.DropShadowEffect
-            {
-                BlurRadius = 18,
-                ShadowDepth = 4,
-                Opacity = 0.4,
-                Color = Colors.Black
-            };
-
-            Grid grid = new Grid();
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-            Ellipse dot = new Ellipse { Width = 7, Height = 7, Margin = new Thickness(0, 6, 11, 0), VerticalAlignment = VerticalAlignment.Top };
-            dot.SetResourceReference(Shape.FillProperty, good ? "LiveBrush" : "DangerBrush");
-            grid.Children.Add(dot);
-
-            StackPanel words = new StackPanel { MaxWidth = 340 };
-            Grid.SetColumn(words, 1);
-
-            TextBlock head = new TextBlock { Text = title };
-            head.SetResourceReference(FrameworkElement.StyleProperty, "Desk.Text.CardHeading");
-            words.Children.Add(head);
-
-            if (!string.IsNullOrEmpty(detail))
-            {
-                TextBlock body = new TextBlock { Text = detail, Margin = new Thickness(0, 3, 0, 0) };
-                body.SetResourceReference(FrameworkElement.StyleProperty, "Desk.Text.Secondary");
-                words.Children.Add(body);
-            }
-
-            grid.Children.Add(words);
-            shell.Child = grid;
-            Content = shell;
+            FontFamily = Ui.UiFont;
+            Foreground = Ui.B("B.Ink");
+            UseLayoutRounding = true;
+            Content = Card(title, detail, problem);
 
             MouseLeftButtonDown += delegate { Close(); };
             life.Interval = TimeSpan.FromSeconds(good ? 4 : 7);
             life.Tick += delegate { Close(); };
         }
 
-        public static void Show(string title, string detail, bool good)
+        // The card alone, so it can be drawn offscreen too. The problem, when there is one, is the
+        // part of the sentence in the error colour; the words carry it either way.
+        public static Border Card(string title, string detail, string problem)
+        {
+            Border tile = new Border
+            {
+                Width = 30, Height = 30, CornerRadius = new CornerRadius(6), Background = Ui.B("B.Ground"),
+                VerticalAlignment = VerticalAlignment.Top,
+                Child = new Viewbox { Width = 18, Height = 18, Child = Ui.Icon("G.Glyph", 16, true, Ui.B("B.Ink")) }
+            };
+
+            StackPanel words = new StackPanel { Margin = new Thickness(12, 0, 0, 0) };
+            TextBlock head = Ui.Text(title, 14, FontWeights.Bold, "B.Ink");
+            head.TextWrapping = TextWrapping.Wrap;
+            words.Children.Add(head);
+            if (!string.IsNullOrEmpty(detail) || !string.IsNullOrEmpty(problem))
+            {
+                TextBlock body = new TextBlock { FontSize = 12, Foreground = Ui.B("B.Ink2"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 1, 0, 0) };
+                if (!string.IsNullOrEmpty(detail)) body.Inlines.Add(new Run(detail));
+                if (!string.IsNullOrEmpty(problem))
+                {
+                    if (body.Inlines.Count > 0) body.Inlines.Add(new Run(" "));
+                    body.Inlines.Add(Ui.Run(problem, "B.Error", FontWeights.Normal));
+                }
+                words.Children.Add(body);
+            }
+
+            DockPanel row = new DockPanel();
+            DockPanel.SetDock(tile, Dock.Left);
+            row.Children.Add(tile);
+            row.Children.Add(words);
+
+            Border card = new Border
+            {
+                Width = 340, Margin = new Thickness(24, 12, 18, 34), Padding = new Thickness(14, 12, 14, 12),
+                Background = Ui.B("B.Menu"), BorderBrush = Ui.B("B.FieldBorder"), BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6), Effect = (System.Windows.Media.Effects.Effect)Ui.R("Shadow"), Child = row
+            };
+            TextElement.SetFontFamily(card, Ui.UiFont);
+            return card;
+        }
+
+        public static void Show(string title, string detail, bool good, string problem = null)
         {
             try
             {
                 if (showing != null) showing.Close();
-                Toast toast = new Toast(title, detail, good);
+                Toast toast = new Toast(title, detail, good, problem);
                 showing = toast;
                 toast.Closed += delegate { if (ReferenceEquals(showing, toast)) showing = null; };
                 toast.Show();
@@ -96,8 +102,8 @@ namespace Snappy
                 sx = source.CompositionTarget.TransformToDevice.M11;
                 sy = source.CompositionTarget.TransformToDevice.M22;
             }
-            Left = (work.Right / sx) - ActualWidth - 18;
-            Top = (work.Bottom / sy) - ActualHeight - 18;
+            Left = (work.Right / sx) - ActualWidth;
+            Top = (work.Bottom / sy) - ActualHeight;
         }
 
         protected override void OnClosed(EventArgs e)

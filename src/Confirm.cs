@@ -1,55 +1,48 @@
+using System;
 using System.Windows;
 using System.Windows.Controls;
-using Ykit;
 
-namespace Snappy
+namespace Slotter
 {
-    // The one modal shape Snappy needs for a yes/no question, wearing the same chrome
-    // as every other window rather than the system message box.
-    public sealed class Confirm : DeskWindow
+    // The one yes/no question Slotter still asks: before something that cannot be taken back
+    // (force closing every app) or thrown away (closing the designer with unsaved changes).
+    public sealed class Confirm : Window
     {
         bool answer;
 
         Confirm(string title, string detail, string confirmLabel, bool danger)
         {
-            Title = "Snappy";
+            Style = Ui.S("Win");
+            Title = "Slotter";
             Icon = App.WindowIcon;
             SizeToContent = SizeToContent.Height;
             Width = 440;
             ResizeMode = ResizeMode.NoResize;
             ShowInTaskbar = false;
-            WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            SourceInitialized += delegate { Ui.TintTitleBar(this); };
 
-            StackPanel body = new StackPanel { Margin = new Thickness(22, 20, 22, 8) };
-
-            TextBlock head = new TextBlock { Text = title };
-            head.SetResourceReference(FrameworkElement.StyleProperty, "Desk.Text.InspectorHeading");
+            StackPanel body = new StackPanel { Margin = new Thickness(22, 20, 22, 20) };
+            TextBlock head = Ui.Text(title, 18, FontWeights.ExtraBold, "B.Ink");
+            head.TextWrapping = TextWrapping.Wrap;
             body.Children.Add(head);
-
-            TextBlock words = new TextBlock { Text = detail, Margin = new Thickness(0, 6, 0, 0) };
-            words.SetResourceReference(FrameworkElement.StyleProperty, "Desk.Text.Secondary");
+            TextBlock words = Ui.Text(detail, 13, FontWeights.Normal, "B.Ink2");
+            words.TextWrapping = TextWrapping.Wrap;
+            words.Margin = new Thickness(0, 6, 0, 0);
             body.Children.Add(words);
 
-            Border bar = new Border();
-            bar.SetResourceReference(FrameworkElement.StyleProperty, "Desk.CommitBar");
+            Button keep = Ui.Button("Btn.Quiet", "Keep editing", delegate { answer = false; Close(); });
+            keep.IsCancel = true;
+            Button go = Ui.Button(danger ? "Btn.Danger" : "Btn.Primary", confirmLabel, delegate { answer = true; Close(); });
+            go.IsDefault = true;
+            go.Margin = new Thickness(8, 0, 0, 0);
             StackPanel actions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-
-            Button keep = new Button { Content = "Keep editing", Margin = new Thickness(0, 0, 9, 0), IsCancel = true };
-            keep.SetResourceReference(FrameworkElement.StyleProperty, "Desk.Button");
-            keep.Click += delegate { answer = false; Close(); };
-
-            Button go = new Button { Content = confirmLabel, IsDefault = true };
-            go.SetResourceReference(FrameworkElement.StyleProperty, "Desk.Button.Primary");
-            if (danger)
-            {
-                go.SetResourceReference(Button.BackgroundProperty, "DangerBrush");
-                go.SetResourceReference(Button.BorderBrushProperty, "DangerBrush");
-            }
-            go.Click += delegate { answer = true; Close(); };
-
             actions.Children.Add(keep);
             actions.Children.Add(go);
-            bar.Child = actions;
+            Border bar = new Border
+            {
+                Background = Ui.B("B.Drawer2"), BorderBrush = Ui.B("B.Rule"), BorderThickness = new Thickness(0, 1, 0, 0),
+                Padding = new Thickness(16, 12, 16, 12), Child = actions
+            };
 
             DockPanel root = new DockPanel();
             DockPanel.SetDock(bar, Dock.Bottom);
@@ -61,7 +54,8 @@ namespace Snappy
         public static bool Ask(Window owner, string title, string detail, string confirmLabel, bool danger)
         {
             Confirm dialog = new Confirm(title, detail, confirmLabel, danger);
-            dialog.Owner = owner;
+            if (owner != null) { dialog.Owner = owner; dialog.WindowStartupLocation = WindowStartupLocation.CenterOwner; }
+            else dialog.WindowStartupLocation = WindowStartupLocation.CenterScreen;
             dialog.ShowDialog();
             return dialog.answer;
         }
