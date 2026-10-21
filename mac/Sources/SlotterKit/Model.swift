@@ -22,14 +22,17 @@ public struct Zone: Sendable, Hashable, Identifiable {
     public var w: Double
     public var h: Double
     public var program: String?
+    public var plateID: UUID?
 
-    public init(monitor: MonitorRef, x: Double, y: Double, w: Double, h: Double, program: String? = nil) {
+    public init(monitor: MonitorRef, x: Double, y: Double, w: Double, h: Double, program: String? = nil,
+                plateID: UUID? = nil) {
         self.monitor = monitor
         self.x = x
         self.y = y
         self.w = w
         self.h = h
         self.program = program
+        self.plateID = plateID
     }
 
     public func clamped() -> Zone {
@@ -51,13 +54,30 @@ public struct Zone: Sendable, Hashable, Identifiable {
 }
 
 public struct Workspace: Sendable, Hashable, Identifiable {
-    public var id = UUID()
+    public var id: UUID
     public var name: String
     public var zones: [Zone]
+    public var virtualPlates: [VirtualPlate]
 
-    public init(name: String, zones: [Zone] = []) {
+    public init(name: String, zones: [Zone] = [], virtualPlates: [VirtualPlate] = [], id: UUID = UUID()) {
+        self.id = id
         self.name = name
         self.zones = zones
+        self.virtualPlates = virtualPlates
+    }
+}
+
+public struct VirtualPlate: Sendable, Hashable, Identifiable {
+    public var id: UUID
+    public var name: String
+    public var monitor: MonitorRef
+    public var desktopID: String?
+
+    public init(id: UUID = UUID(), name: String, monitor: MonitorRef, desktopID: String?) {
+        self.id = id
+        self.name = name
+        self.monitor = monitor
+        self.desktopID = desktopID
     }
 }
 
@@ -107,7 +127,7 @@ public struct SlotterConfig: Sendable {
 }
 
 public enum Validate {
-    public static let reservedSections: Set<String> = ["profiles", "programs", "panel", "settings", "shortcuts"]
+    public static let reservedSections: Set<String> = ["profiles", "programs", "panel", "settings", "shortcuts", "spacebindings", "virtualplates"]
 
     public static func workspaceName(_ raw: String, excluding existing: Workspace? = nil, in workspaces: [Workspace]) -> String? {
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)

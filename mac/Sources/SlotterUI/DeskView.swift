@@ -16,8 +16,10 @@ struct DeskView: View {
             let workspace = model.selectedWorkspace
             let stageTop: CGFloat = layout.narrow ? 24 : 84
             let stage = CGSize(width: proxy.size.width, height: max(0, proxy.size.height - stageTop))
+            let shelfHeight = min(VirtualPlateShelf.height(for: workspace, choicesOpen: model.showingVirtualChoices),
+                                  max(100, stage.height * 0.55))
             let frame = StageFrame(desk: desk, size: stage, narrow: layout.narrow,
-                                   sinkToDesk: workspace == nil && layout.narrow)
+                                   sinkToDesk: workspace == nil && layout.narrow, reservedHeight: shelfHeight)
 
             ZStack(alignment: .topLeading) {
                 Stage(model: model, desk: desk, frame: frame, workspace: workspace, narrow: layout.narrow)
@@ -34,15 +36,11 @@ struct DeskView: View {
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
-            .overlay(alignment: .topTrailing) {
-                // On the plates' line, whichever glyph it leads with, so it reads as one row.
-                // Dropped rather than crowding the last plate, and while the settings tab that says the
-                // same is open.
-                let plateRight = desk.placements.last.map { frame.originX + $0.centreX * frame.scale + Plate.width($0.monitor) / 2 } ?? 0
-                if !layout.narrow, model.face != .settings, plateRight + 24 < proxy.size.width - 28 - MarginNote.width(model.status) {
-                    MarginNote(model: model)
-                        .padding(.trailing, 28)
-                        .offset(y: stageTop + frame.deskY + 8 - 4)
+            .overlay(alignment: .bottomLeading) {
+                if workspace != nil {
+                    VirtualPlateShelf(model: model, desk: desk, maxHeight: shelfHeight)
+                        .padding(.horizontal, 22)
+                        .padding(.bottom, 8)
                 }
             }
         }
@@ -54,6 +52,252 @@ struct DeskView: View {
     }
 }
 
+private struct VirtualPlateShelf: View {
+    @Bindable var model: SettingsModel
+    let desk: DeskArrangement
+    let maxHeight: CGFloat
+
+    private struct DesktopChoice: Identifiable {
+        let display: ManagedDisplaySpaces
+        let space: ManagedSpace
+        var id: String { "\(display.displayUUID):\(space.uuid)" }
+    }
+
+    private var desktops: [DesktopChoice] {
+        let plate = model.selectedWorkspace?.virtualPlates.first { $0.id == model.selectedBenchedPlateID }
+        let targetUUID = plate?.monitor.uuid
+            ?? monitors.first(where: { $0.id == model.selectedVirtualMonitorID })?.reference.uuid
+            ?? (monitors.count == 1 ? monitors.first?.reference.uuid : nil)
+        return model.status.spaceSnapshot.displays.filter { targetUUID == nil || $0.displayUUID == targetUUID }.flatMap { display in
+            display.spaces.filter { !$0.isFullscreen }.map { DesktopChoice(display: display, space: $0) }
+        }
+    }
+
+    private var monitors: [DeskMonitor] { desk.monitors.filter(\.isConnected) }
+
+    static func height(for workspace: Workspace?, choicesOpen: Bool) -> CGFloat {
+        guard let workspace else { return 0 }
+        let pinned = workspace.virtualPlates.contains { $0.desktopID != nil }
+        let bench = workspace.virtualPlates.contains { $0.desktopID == nil }
+        return (pinned ? 176 : 0) + (bench ? 62 : 0) + 34 + (choicesOpen ? 46 : 0) + 10
+    }
+
+    var body: some View {
+        let workspace = model.selectedWorkspace
+        ScrollView(.vertical) {
+          VStack(alignment: .leading, spacing: 6) {
+            let pinned = workspace?.virtualPlates.filter { $0.desktopID != nil } ?? []
+            if !pinned.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack(alignment: .top, spacing: 12) {
+                        ForEach(pinned) { plate in
+                            if let workspace,
+                               let placement = desk.placements.first(where: { $0.monitor.id == model.monitorKeyFor(plate.monitor) }) {
+                                VirtualPlateMini(model: model, plate: plate, workspace: workspace, placement: placement)
+                            }
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+            }
+            let benched = workspace?.virtualPlates.filter { $0.desktopID == nil } ?? []
+            if let workspace, !benched.isEmpty {
+                HStack(spacing: 8) {
+                    Text("BENCH").font(T.font(T.type.caption, .bold)).tracking(0.5).foregroundStyle(P.ink3)
+                    ForEach(benched) { plate in
+                        BenchedPlateThumbnail(model: model, plate: plate, workspace: workspace)
+                    }
+                }
+            }
+            HStack(spacing: 6) {
+                Button {
+                    model.selectedBenchedPlateID = nil
+                    model.selectedVirtualMonitorID = nil
+                    model.showingVirtualChoices.toggle()
+                } label: {
+                    HStack(spacing: 4) { Icon(kind: .plus, size: 11); Text("Virtual") }
+                }
+                .buttonStyle(InkButtonStyle(kind: .dashed, height: 28))
+                .disabled(!model.status.spaceSnapshot.available)
+                .help(model.status.spaceSnapshot.available ? "Create a virtual plate" : "Desktop detection is unavailable")
+                if !model.status.spaceSnapshot.available {
+                    Text("Desktop detection is unavailable.").font(T.font(T.type.small)).foregroundStyle(P.ink2)
+                }
+            }
+            if model.showingVirtualChoices {
+                if monitors.count > 1 && model.selectedVirtualMonitorID == nil && model.selectedBenchedPlateID == nil {
+                    HStack(spacing: 6) {
+                        ForEach(monitors) { monitor in
+                            Button {
+                                model.selectedVirtualMonitorID = monitor.id
+                            } label: {
+                                let size = desk.placement(for: monitor.id)
+                                VStack(spacing: 3) {
+                                    RoundedRectangle(cornerRadius: 2).fill(P.screenUnused)
+                                        .frame(width: min(54, max(30, 54 * (size?.screenWidth ?? 1) / max(1, size?.screenHeight ?? 1))), height: 24)
+                                        .overlay(RoundedRectangle(cornerRadius: 2).stroke(P.rule, lineWidth: 1))
+                                    Text(monitor.name).font(T.font(T.type.caption)).lineLimit(1)
+                                }
+                                .foregroundStyle(P.ink2)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Choose \(monitor.name)")
+                        }
+                    }
+                } else {
+                    HStack(spacing: 6) {
+                        ForEach(desktops) { item in
+                            let display = item.display
+                            let desktop = item.space
+                            let monitorID = model.selectedVirtualMonitorID
+                                ?? monitors.first(where: { $0.reference.uuid == display.displayUUID })?.id
+                                ?? monitors.first?.id
+                            let existing = workspace?.virtualPlates.contains(where: { plate in
+                                plate.desktopID == desktop.uuid && (monitorID == nil || model.monitorKeyFor(plate.monitor) == monitorID)
+                                    && plate.id != model.selectedBenchedPlateID
+                            }) ?? false
+                            Button(desktop.label) {
+                                guard let monitorID, let monitor = monitors.first(where: { $0.id == monitorID }) else { return }
+                                if let benchedPlateID = model.selectedBenchedPlateID { model.pinVirtualPlate(benchedPlateID, to: desktop) }
+                                else { model.addVirtualPlate(on: monitor, desktop: desktop) }
+                                model.selectedBenchedPlateID = nil
+                                model.showingVirtualChoices = false
+                                model.selectedVirtualMonitorID = nil
+                            }
+                            .buttonStyle(InkButtonStyle(kind: .dashed, height: 26))
+                            .disabled(existing || monitorID == nil)
+                        }
+                    }
+                }
+            }
+          }
+          .padding(8)
+          .background(P.drawer.opacity(0.94))
+          .overlay(alignment: .top) { Rectangle().fill(P.rule).frame(height: 1) }
+        }
+        .frame(maxHeight: maxHeight)
+        .scrollIndicators(.hidden)
+    }
+}
+
+private struct VirtualPlateMini: View {
+    @Bindable var model: SettingsModel
+    let plate: VirtualPlate
+    let workspace: Workspace
+    let placement: DeskPlacement
+
+    private var zones: [Zone] { workspace.zones.filter { $0.plateID == plate.id } }
+    private var desktopName: String {
+        guard let id = plate.desktopID else { return "SAVED DESKTOP" }
+        return model.status.spaceSnapshot.displays.flatMap(\.spaces).first { $0.uuid == id }?.label ?? "SAVED DESKTOP"
+    }
+    private var screen: CGSize {
+        let scale = min(204 / max(1, placement.screenWidth), 104 / max(1, placement.screenHeight))
+        return CGSize(width: placement.screenWidth * scale, height: placement.screenHeight * scale)
+    }
+    private var selected: Bool { model.selectedVirtualPlateID == plate.id }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Text(desktopName)
+                    .font(T.font(T.type.caption, .bold)).tracking(0.35).foregroundStyle(P.ink2)
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(P.drawerFace).dashedBorder(P.rule, radius: T.radii.chip)
+                Button(plate.name) { model.selectVirtualPlate(plate.id) }
+                    .font(T.font(T.type.small, .semibold)).foregroundStyle(P.ink)
+                    .lineLimit(1).buttonStyle(.plain)
+                    .simultaneousGesture(TapGesture(count: 2).onEnded {
+                        model.selectVirtualPlate(plate.id)
+                        model.focusVirtualPlateName = true
+                    })
+                    .help("Double-click to rename this plate")
+                Spacer(minLength: 2)
+                Button("Bench") { model.benchVirtualPlate(plate.id) }
+                    .buttonStyle(InkButtonStyle(kind: .quiet, height: 22))
+            }
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: T.radii.bezel).fill(P.bezel)
+                ForEach(zones) { zone in
+                    MiniPlateZone(model: model, zone: zone, number: model.number(of: zone, in: workspace), screen: screen)
+                }
+            }
+            .padding(4)
+            .frame(width: screen.width + 8, height: screen.height + 8)
+            .overlay(RoundedRectangle(cornerRadius: T.radii.bezel)
+                .strokeBorder(selected ? P.selection : P.ink2, style: StrokeStyle(lineWidth: selected ? 2 : 1, dash: selected ? [] : [5, 3])))
+            .contentShape(Rectangle())
+        }
+        .padding(6)
+        .background(P.drawerFace)
+        .dashedBorder(selected ? P.selection : P.rule, radius: T.radii.field)
+    }
+}
+
+private struct MiniPlateZone: View {
+    let model: SettingsModel
+    let zone: Zone
+    let number: Int
+    let screen: CGSize
+
+    var body: some View {
+        Button { model.selectZone(zone.id) } label: {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(zone.program == nil ? P.zoneEmpty : P.zone)
+                .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(zone.id == model.selectedZoneID ? P.selection : P.zoneLine, lineWidth: zone.id == model.selectedZoneID ? 2 : 1))
+                .overlay(Text("\(number)").font(T.font(T.type.caption, .bold).monospacedDigit()).foregroundStyle(P.ink))
+                .frame(width: max(2, screen.width * zone.w / 100 - 2), height: max(2, screen.height * zone.h / 100 - 2))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .offset(x: screen.width * zone.x / 100 + 1, y: screen.height * zone.y / 100 + 1)
+        .accessibilityLabel("Zone \(number)")
+    }
+}
+
+private struct BenchedPlateThumbnail: View {
+    @Bindable var model: SettingsModel
+    let plate: VirtualPlate
+    let workspace: Workspace
+    private var zones: [Zone] { workspace.zones.filter { $0.plateID == plate.id } }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Button {
+                model.selectedBenchedPlateID = plate.id
+                model.showingVirtualChoices = true
+                model.selectedVirtualMonitorID = nil
+            } label: {
+                VStack(spacing: 2) {
+                    GeometryReader { proxy in
+                        ZStack(alignment: .topLeading) {
+                            RoundedRectangle(cornerRadius: 3).fill(P.bezel)
+                            ForEach(zones) { zone in
+                                RoundedRectangle(cornerRadius: 1).fill(zone.program == nil ? P.zoneEmpty : P.zone)
+                                    .overlay(RoundedRectangle(cornerRadius: 1).strokeBorder(P.zoneLine, lineWidth: 0.5))
+                                    .frame(width: max(2, proxy.size.width * zone.w / 100 - 2), height: max(2, proxy.size.height * zone.h / 100 - 2))
+                                    .offset(x: proxy.size.width * zone.x / 100 + 1, y: proxy.size.height * zone.y / 100 + 1)
+                            }
+                        }
+                    }
+                    .frame(width: 72, height: 38)
+                    Text(plate.name).font(T.font(T.type.caption, .semibold)).foregroundStyle(P.ink2).lineLimit(1)
+                }
+                .frame(width: 88, height: 54)
+                .help("Pull \(plate.name) out and choose a desktop")
+            }
+            .buttonStyle(.plain)
+            Button { model.confirmDeleteBenchedPlate(plate.id) } label: { Icon(kind: .delete, size: 12) }
+                .buttonStyle(IconButtonStyle(danger: true))
+                .help("Delete benched plate")
+                .accessibilityLabel("Delete \(plate.name)")
+        }
+        .padding(3)
+        .background(P.drawerFace)
+        .dashedBorder(P.rule, radius: T.radii.chip)
+    }
+}
+
 /// One scale factor times inch measurements, fitted to the stage as the mock does.
 struct StageFrame {
     let scale: CGFloat
@@ -62,12 +306,14 @@ struct StageFrame {
     let deskY: CGFloat
     let captionHeight: CGFloat
 
-    init(desk: DeskArrangement, size: CGSize, narrow: Bool, sinkToDesk: Bool) {
+    init(desk: DeskArrangement, size: CGSize, narrow: Bool, sinkToDesk: Bool, reservedHeight: CGFloat = 0) {
         captionHeight = narrow ? 34 : 42
         let pad: CGFloat = narrow ? 12 : 32
-        scale = max(2, min((size.width - pad * 2) / desk.width, (size.height - captionHeight - 10) / desk.deskLine))
+        let deskHeight = max(0, size.height - reservedHeight)
+        scale = max(reservedHeight > 0 ? 0.1 : 2,
+                    min((size.width - pad * 2) / desk.width, (deskHeight - captionHeight - 10) / desk.deskLine))
         originX = (size.width - desk.width * scale) / 2
-        let free = size.height - captionHeight - desk.deskLine * scale
+        let free = deskHeight - captionHeight - desk.deskLine * scale
         originY = max(4, free - max(0, free * (sinkToDesk ? 0 : 0.35)))
         deskY = originY + desk.deskLine * scale
     }
@@ -102,7 +348,7 @@ private struct Stage: View {
                 let footHeight = max(4, placement.footHeight * s)
                 let neckWidth = max(8, placement.neckWidth * s)
                 let footWidth = placement.footWidth * s
-                let hasFault = workspace?.zones.contains { model.monitorKey($0) == placement.monitor.id && model.fault(of: $0) != nil } ?? false
+                let hasFault = workspace?.zones.contains { $0.plateID == nil && model.monitorKey($0) == placement.monitor.id && model.fault(of: $0) != nil } ?? false
 
                 ZStack(alignment: .topLeading) {
                     LinearGradient(stops: [.init(color: P.standLow, location: 0), .init(color: P.standHigh, location: 0.45),
@@ -146,7 +392,9 @@ private struct MonitorView: View {
     var body: some View {
         let monitor = placement.monitor
         let off = !monitor.isConnected
-        let zones = workspace?.zones.filter { model.monitorKey($0) == monitor.id } ?? []
+        let zones = workspace?.zones.filter {
+            model.monitorKey($0) == monitor.id && $0.plateID == nil
+        } ?? []
         let unused = workspace != nil && zones.isEmpty
         let shape = RoundedRectangle(cornerRadius: T.radii.bezel)
 
@@ -173,11 +421,12 @@ private struct MonitorView: View {
                     }
                     if unused {
                         VStack(spacing: 6) {
-                            Text("Not used by \(workspace.name)")
+                            Text("Set up \(monitor.name)")
                                 .font(T.font(T.type.small))
                                 .foregroundStyle(P.ink3)
                                 .multilineTextAlignment(.center)
-                            LinkButton(title: "Use this monitor") { model.useMonitor(monitor) }
+                            LinkButton(title: "+") { model.useMonitor(monitor) }
+                                .help("Set up \(monitor.name)")
                         }
                         .padding(8)
                         .frame(width: screen.width, height: screen.height)
@@ -443,8 +692,9 @@ private struct DocumentHead: View {
             return ("\(Self.list(gone)) \(one ? "is" : "are") disconnected. \(one ? "Its" : "Their") zones stay editable and fill when \(one ? "it returns" : "they return").",
                     "\(Self.list(gone)) disconnected. Edits are kept.", true)
         }
-        let apps = workspace.zones.filter { !($0.program ?? "").isEmpty }.count
-        let zones = workspace.zones.count == 1 ? "1 zone" : "\(workspace.zones.count) zones"
+        let physicalZones = workspace.zones.filter { $0.plateID == nil }
+        let apps = physicalZones.filter { !($0.program ?? "").isEmpty }.count
+        let zones = physicalZones.count == 1 ? "1 zone" : "\(physicalZones.count) zones"
         let counts = "\(zones), \(apps) with apps"
         let used = names(keys)
         return ((used.isEmpty ? "" : used.joined(separator: " + ") + " · ") + counts,
@@ -473,39 +723,6 @@ private struct DocumentHead: View {
         let words = ["No", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine"]
         let word = count < words.count ? words[count] : "\(count)"
         return "\(word) \(noun)\(count == 1 ? "" : "s")"
-    }
-}
-
-private struct MarginNote: View {
-    let model: SettingsModel
-
-    static func text(_ status: SettingsModel.Status) -> String {
-        !status.accessibilityTrusted ? "Accessibility not granted"
-            : status.shortcutFailures > 0 ? "\(status.shortcutFailures) snap shortcut\(status.shortcutFailures == 1 ? "" : "s") unavailable"
-            : "Snap shortcuts ready"
-    }
-
-    static func width(_ status: SettingsModel.Status) -> CGFloat {
-        let bad = !status.accessibilityTrusted || status.shortcutFailures > 0
-        return measure(text(status), T.nsFont(T.type.small, bad ? .semibold : .regular)) + (bad ? 18 : 0) + 12
-    }
-
-    var body: some View {
-        let status = model.status
-        let bad = !status.accessibilityTrusted || status.shortcutFailures > 0
-        let text = Self.text(status)
-        Button { model.face = .settings } label: {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                if bad { Icon(kind: .warn, size: 12).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 } }
-                Text(text).font(T.font(T.type.small, bad ? .semibold : .regular))
-            }
-            .foregroundStyle(bad ? P.error : P.ink3)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .focusRing()
     }
 }
 

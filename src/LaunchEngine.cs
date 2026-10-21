@@ -23,6 +23,7 @@ namespace Slotter
             Screen[] screens = Screen.AllScreens;
             foreach (Zone z in p.Zones)
             {
+                if (!string.IsNullOrEmpty(z.PlateId)) continue;
                 if (string.IsNullOrEmpty(z.Prog)) continue;
                 if (Config.ResolveScreenIndex(z, screens) < 0) { Log.Write("skip " + z.Prog + ": monitor " + z.Mon + " disconnected"); continue; }
                 result.Planned++;

@@ -30,9 +30,10 @@ public final class WorkspaceLauncher {
 
         let snapshot = DisplayRegistry.current
         var result = LaunchResult()
-        result.zoneCount = workspace.zones.count
+        let physicalZones = workspace.zones.filter { $0.plateID == nil }
+        result.zoneCount = physicalZones.count
 
-        for zone in workspace.zones {
+        for zone in physicalZones {
             guard let programName = zone.program, !programName.isEmpty else { continue }
             guard let program = programs.first(where: { $0.name.caseInsensitiveCompare(programName) == .orderedSame }) else {
                 record(&result, error: "\(programName) is not in the program library.")

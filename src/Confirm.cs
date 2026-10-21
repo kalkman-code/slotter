@@ -4,8 +4,7 @@ using System.Windows.Controls;
 
 namespace Slotter
 {
-    // The one yes/no question Slotter still asks: before something that cannot be taken back
-    // (force closing every app) or thrown away (closing the designer with unsaved changes).
+    // Shared confirmation window for destructive actions.
     public sealed class Confirm : Window
     {
         bool answer;

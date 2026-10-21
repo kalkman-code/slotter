@@ -15,8 +15,10 @@ also does the opening, so a workspace is a desk you can get back in one action.
 
 - **Left click** the tray or menu bar icon to open the designer. **Right click** for the menu:
   launch a workspace, start at login, window controls, quit.
-- On Windows, `Ctrl + Alt + Space` launches the last workspace. It can be turned off, and the
-  designer says when another app already holds it.
+- Keyboard shortcuts snap the front window to halves, thirds, corners and the next display
+  (`Ctrl + Alt` on Windows, `⌃ ⌥` on macOS), and on Windows `Ctrl + Alt + Space` launches the last
+  workspace. The designer's **Shortcuts** tab lists every one: click a shortcut to record a new
+  one, clear it, or reset it, and it says when another app already holds one.
 - Dragging a window by its title bar shows the active workspace's zones; release inside one to
   snap the window there.
 - **Close every open app** asks visible apps to close. **Force close every open app** ends them
@@ -29,19 +31,28 @@ workspace's zones on them. Pick a workspace from the tabs across the top, click 
 drawer underneath edits it: the app it opens, its position and size as percentages of the screen,
 split it, delete it, or apply one of nine layouts to the whole monitor. **Manage programs…**
 defines each app once (name, program or `.app`, optional arguments); renaming one updates every
-zone that uses it. Edits are staged until you **Save changes**, and anything that would not work,
-such as a zone running off the edge of its screen, blocks the save and says where.
+zone that uses it. Every edit saves as you make it and undo steps back through them; anything that
+would not work, such as a zone running off the edge of its screen, says where and is not saved
+until it is fixed.
 
-A workspace for a monitor that is not connected stays listed and editable, marked offline.
+A connected monitor the workspace does not use yet is drawn greyed out with a **+**: press it to
+set that monitor up. A workspace for a monitor that is not connected stays listed and editable,
+marked offline.
+
+**+ Virtual** pins a copy of a monitor to one virtual desktop (a Space on macOS). It sits under
+the desk as its own plate, you name it and draw its zones like any other, and on that desktop its
+zones replace the monitor's own for drag-snap. Switching desktop never opens apps or moves
+windows. Bench a plate when you are done with that desktop and pull it out again onto any desktop
+later.
 
 ## Permissions
 
 - **Windows**: Slotter asks to run as administrator (one UAC prompt) because Windows only lets an
   elevated app move an elevated window, such as Task Manager or an admin terminal.
 - **macOS**: Slotter needs Accessibility permission to move other apps' windows and asks for
-  nothing else. It never reads window contents or keystrokes. macOS also gets Magnet-compatible
-  keyboard shortcuts for halves, thirds, quarters and moving between displays; see
-  [`mac/README.md`](mac/README.md).
+  nothing else. It never reads window contents or keystrokes. Telling which Space is showing
+  uses private macOS calls, as yabai and Hammerspoon do; if a macOS update breaks them, the
+  feature reports itself unavailable and nothing else changes. See [`mac/README.md`](mac/README.md).
 
 ## Configuration
 
@@ -53,6 +64,15 @@ such as `GSMC0C8-UID4352=Left screen`. The designer draws monitors at their real
 when they report it; TVs often do not, so give a diagonal in inches under `[DisplaySizes]`, keyed by
 the name the designer shows, such as `LG TV SSCR2=48`. Coming from Snappy, Slotter's name before 1.0: the first run
 carries your workspaces over.
+
+## Install
+
+Download the macOS DMG or Windows ZIP from [GitHub Releases](https://github.com/kalkman-code/slotter/releases).
+
+- **Windows**: unzip the release, then run `Slotter.exe`. The executable is signed by Toby Kalkman using Certum open source code signing. SmartScreen may still warn on a new download until the certificate builds reputation. Slotter asks for administrator permission once because Windows only lets an elevated app move an elevated window.
+- **macOS**: open the DMG, drag Slotter to Applications, then open it. Allow Accessibility when macOS asks so Slotter can move other apps' windows.
+
+Requirements: Windows 10 version 1809 or later (64-bit); macOS 14 or later.
 
 ## Build from source
 
@@ -80,3 +100,7 @@ signature would drop it on every rebuild.
 The two builds share no code: Windows is .NET 10 and WPF in `src/`, macOS is Swift, AppKit and
 SwiftUI in `mac/`. Both wear the same design, set in Bricolage Grotesque (SIL Open Font Licence,
 in `fonts/`).
+
+## Licence
+
+GPL-3.0-only; see [LICENSE](LICENSE).

@@ -23,13 +23,18 @@ public final class ShortcutCenter {
     private var refs: [UInt32: EventHotKeyRef] = [:]
     private var actions: [UInt32: SnapAction] = [:]
     private var nextID: UInt32 = 1
+    private var activeTable: [SnapAction: KeyCombo] = [:]
+    private var suspendedForRecording = false
 
     public var onAction: ((SnapAction) -> Void)?
+    public var onRegistrationsChanged: (([Registration]) -> Void)?
 
     public init() {}
 
     @discardableResult
     public func register(_ table: [SnapAction: KeyCombo]) -> [Registration] {
+        activeTable = table
+        guard !suspendedForRecording else { return [] }
         unregisterAll()
         installHandler()
 
@@ -62,7 +67,19 @@ public final class ShortcutCenter {
                 Log.error("shortcut unavailable: \(failure.action.title) \(failure.combo.display) status=\(failure.status)")
             }
         }
+        onRegistrationsChanged?(results)
         return results
+    }
+
+    public func suspendForRecording() {
+        suspendedForRecording = true
+        unregisterAll()
+    }
+
+    @discardableResult
+    public func resumeAfterRecording() -> [Registration] {
+        suspendedForRecording = false
+        return register(activeTable)
     }
 
     public func unregisterAll() {

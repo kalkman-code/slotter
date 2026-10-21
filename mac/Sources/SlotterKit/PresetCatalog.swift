@@ -21,6 +21,21 @@ public struct LayoutPreset: Sendable, Hashable, Identifiable {
 }
 
 public enum PresetCatalog {
+    public static func grid(columns: Int, rows: Int) -> LayoutPreset? {
+        guard (1...20).contains(columns), (1...20).contains(rows) else { return nil }
+        func edge(_ index: Int, _ count: Int) -> Double {
+            (Double(index) * 10000 / Double(count)).rounded() / 100
+        }
+        let zones = (0..<rows).flatMap { row in
+            (0..<columns).map { column in
+                ZoneFraction(edge(column, columns), edge(row, rows),
+                             edge(column + 1, columns) - edge(column, columns),
+                             edge(row + 1, rows) - edge(row, rows))
+            }
+        }
+        return LayoutPreset(name: "\(columns) × \(rows) grid", zones: zones)
+    }
+
     public static let all: [LayoutPreset] = [
         LayoutPreset(name: "Full", zones: [ZoneFraction(0, 0, 100, 100)]),
         LayoutPreset(name: "2 columns", zones: [
@@ -58,6 +73,48 @@ public enum PresetCatalog {
 }
 
 public enum ZoneOps {
+    /// Enumerate horizontal spans, then subtract the union of occupied vertical intervals.
+    /// Inward rounding keeps free rectangles clear of slots with fractional edges.
+    public static func largestFreeSpace(among zones: [Zone]) -> ZoneFraction? {
+        let occupied = zones.compactMap { zone -> ZoneFraction? in
+            guard [zone.x, zone.y, zone.w, zone.h].allSatisfy(\.isFinite), zone.w > 0, zone.h > 0 else { return nil }
+            let left = max(0, zone.x), top = max(0, zone.y)
+            let right = min(100, zone.x + zone.w), bottom = min(100, zone.y + zone.h)
+            guard right > left, bottom > top else { return nil }
+            return ZoneFraction(left, top, right - left, bottom - top)
+        }
+        let edges = Set([0.0, 100.0] + occupied.flatMap { [$0.x, $0.x + $0.w] }).sorted()
+        var best: ZoneFraction?
+        var bestArea = 0.0
+        func consider(_ left: Double, _ right: Double, _ top: Double, _ bottom: Double) {
+            let x = ceil(left * 100 - 0.000001) / 100
+            let y = ceil(top * 100 - 0.000001) / 100
+            let w = floor(right * 100 + 0.000001) / 100 - x
+            let h = floor(bottom * 100 + 0.000001) / 100 - y
+            guard w >= 1, h >= 1 else { return }
+            let area = w * h
+            if area > bestArea + 0.000001 || (abs(area - bestArea) < 0.000001 && (y, x) < (best?.y ?? 101, best?.x ?? 101)) {
+                best = ZoneFraction(x, y, w, h)
+                bestArea = area
+            }
+        }
+        for leftIndex in 0..<(edges.count - 1) {
+            for rightIndex in (leftIndex + 1)..<edges.count {
+                let left = edges[leftIndex], right = edges[rightIndex]
+                guard right - left >= 1 else { continue }
+                let intervals = occupied.filter { $0.x < right - 0.0000001 && $0.x + $0.w > left + 0.0000001 }
+                    .sorted { $0.y < $1.y }
+                var bottom = 0.0
+                for interval in intervals {
+                    consider(left, right, bottom, interval.y)
+                    bottom = max(bottom, interval.y + interval.h)
+                }
+                consider(left, right, bottom, 100)
+            }
+        }
+        return best
+    }
+
     public static func splitVertical(_ zone: Zone) -> [Zone] {
         let half = (zone.w / 2 * 100).rounded() / 100
         var left = zone

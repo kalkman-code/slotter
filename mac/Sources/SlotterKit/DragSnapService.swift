@@ -53,6 +53,7 @@ public final class DragSnapService {
     ]
 
     public var workspaceProvider: (() -> Workspace?)?
+    public var workspacesByDisplayProvider: (() -> [String: Workspace])?
 
     private let callbacks: Callbacks
     private var tap: MouseTap?
@@ -149,7 +150,8 @@ public final class DragSnapService {
     private func prewarmTargets() {
         let snapshot = DisplayRegistry.current
         flipY = snapshot.flipY
-        let built = SnapTargetBuilder.build(workspace: workspaceProvider?(), snapshot: snapshot)
+        let built = SnapTargetBuilder.build(workspacesByDisplay: workspacesByDisplayProvider?() ?? [:],
+                                            fallback: workspaceProvider?(), snapshot: snapshot)
         guard case .armed(let candidate) = phase else { return }
         phase = .dragging(Session(window: candidate.window,
                                   pid: candidate.pid,

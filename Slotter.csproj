@@ -22,9 +22,11 @@
     <AssemblyTitle>Slotter</AssemblyTitle>
     <Description>One-click workspace launcher and window snapper for Windows</Description>
     <Company>Kalkman</Company>
-    <Version>1.0.0</Version>
-    <FileVersion>1.0.0</FileVersion>
-    <InformationalVersion>1.0</InformationalVersion>
+    <Version>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)/VERSION').Trim())</Version>
+    <FileVersion>$([System.Text.RegularExpressions.Regex]::Replace($([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)/VERSION').Trim()), '-.*$', '.1'))</FileVersion>
+    <InformationalVersion>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)/VERSION').Trim())</InformationalVersion>
+    <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
+    <Copyright>© 2026 Toby Kalkman, GPL-3.0-only</Copyright>
 
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>

@@ -106,6 +106,7 @@ namespace Slotter
                 if (Profile != null)
                     foreach (Zone z in Profile.Zones)
                     {
+                        if (!string.IsNullOrEmpty(z.PlateId)) continue;
                         if (!Slotter.Monitors.Holds(p.Monitor, z)) continue;
                         pl.Used = true;
                         Rect r = new Rect(screen.X + screen.Width * z.X / 100 + 2, screen.Y + screen.Height * z.Y / 100 + 2,

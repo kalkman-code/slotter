@@ -13,6 +13,6 @@ let package = Package(
         .target(name: "SlotterUI", dependencies: ["SlotterKit"]),
         .executableTarget(name: "Slotter", dependencies: ["SlotterKit", "SlotterUI"]),
         .executableTarget(name: "SlotterIconGen"),
-        .testTarget(name: "SlotterKitTests", dependencies: ["SlotterKit"]),
+        .testTarget(name: "SlotterKitTests", dependencies: ["SlotterKit", "SlotterUI"]),
     ]
 )

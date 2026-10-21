@@ -1,10 +1,12 @@
 import AppKit
+import Carbon.HIToolbox
+import Observation
 import SlotterKit
 import SwiftUI
 
 private let P = T.palette
 
-/// The inspector: a drawer under the desk with two tabs on its top edge and Save beside them.
+/// The inspector: a drawer under the desk with its faces on the top edge.
 /// Clicking the open tab shuts it.
 struct DrawerView: View {
     @Bindable var model: SettingsModel
@@ -21,11 +23,13 @@ struct DrawerView: View {
                     DrawerTab(title: "Slotter settings", selected: model.face == .settings, enabled: true) {
                         model.toggleFace(.settings)
                     }
+                    DrawerTab(title: "Shortcuts", selected: model.face == .shortcuts, enabled: true) {
+                        model.toggleFace(.shortcuts)
+                    }
                 }
                 Spacer(minLength: 0)
             }
             .frame(height: 46, alignment: .bottom)
-            .overlay(alignment: .trailing) { CommitBar(model: model, narrow: layout.narrow).padding(.top, 2) }
             .padding(.leading, layout.narrow ? 12 : 24)
             .padding(.trailing, layout.narrow ? 12 : 16)
             .zIndex(1)
@@ -34,7 +38,15 @@ struct DrawerView: View {
                 ZoneFace(model: model, zone: zone, workspace: workspace, layout: layout)
                     .modifier(Face(narrow: layout.stacked))
             } else if model.face == .settings {
-                SettingsFace(model: model, layout: layout)
+                VStack(alignment: .leading, spacing: 12) {
+                    if let plate = model.selectedWorkspace?.virtualPlates.first(where: { $0.id == model.selectedVirtualPlateID }) {
+                        VirtualPlateNameField(model: model, plate: plate)
+                    }
+                    SettingsFace(model: model, layout: layout)
+                }
+                    .modifier(Face(narrow: layout.stacked))
+            } else if model.face == .shortcuts {
+                ShortcutsFace(model: model, layout: layout)
                     .modifier(Face(narrow: layout.stacked))
             }
         }
@@ -83,7 +95,7 @@ private struct DrawerTab: View {
                 .font(T.font(T.type.small, .semibold))
                 .foregroundStyle(selected ? P.ink : P.ink2)
                 .lineLimit(1)
-                .fixedSize()
+                .truncationMode(.middle)
                 .padding(.horizontal, 12)
                 .frame(height: 28)
                 .background {
@@ -102,60 +114,6 @@ private struct DrawerTab: View {
     }
 }
 
-private struct CommitBar: View {
-    @Bindable var model: SettingsModel
-    let narrow: Bool
-    @State private var hoveringFault = false
-
-    var body: some View {
-        let faults = model.faults
-        HStack(spacing: 8) {
-            if !faults.isEmpty {
-                Button { model.gotoFirstFault() } label: {
-                    HStack(spacing: 7) {
-                        Icon(kind: .warn, size: 14)
-                        Text(narrow ? "\(faults.count) to fix"
-                             : "\(faults.count) problem\(faults.count == 1 ? " stops" : "s stop") saving")
-                    }
-                    .font(T.font(T.type.small, .semibold))
-                    .foregroundStyle(P.error)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
-                    .background(RoundedRectangle(cornerRadius: T.radii.field).fill(hoveringFault ? P.errorGround : .clear))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .onHover { hoveringFault = $0 }
-                .focusRing()
-                .help(faults.map(\.message).joined(separator: "\n"))
-            } else if model.dirty {
-                HStack(spacing: 7) {
-                    Circle().fill(P.ink).frame(width: 8, height: 8)
-                    Text(narrow ? "Unsaved" : "Unsaved changes")
-                }
-                .font(T.font(T.type.small))
-                .foregroundStyle(P.ink2)
-                .padding(.horizontal, 6)
-            } else if !narrow || model.saved {
-                Text(model.saved ? "Saved" : "No changes")
-                    .font(T.font(T.type.small))
-                    .foregroundStyle(P.ink2)
-                    .padding(.horizontal, 6)
-            }
-
-            Button("Cancel") { model.cancel() }
-                .buttonStyle(InkButtonStyle(kind: .quiet))
-                .disabled(!model.dirty)
-
-            Button { model.save() } label: { Text(narrow ? "Save" : "Save changes") }
-                .buttonStyle(InkButtonStyle(kind: .primary, blocked: !model.dirty || !faults.isEmpty))
-                .keyboardShortcut("s", modifiers: .command)
-                .accessibilityHint(faults.isEmpty ? "" : "Save is blocked: " + faults.map(\.message).joined(separator: "; "))
-        }
-        .fixedSize()
-    }
-}
-
 // MARK: - Zone face
 
 private struct ZoneFace: View {
@@ -169,8 +127,11 @@ private struct ZoneFace: View {
         let monitor = model.desk.monitors.first { $0.id == key }
         let number = model.number(of: zone, in: workspace)
         let inner = layout.width - (layout.stacked ? 28 : 64)
+        let virtualPlate = workspace.virtualPlates.first { $0.id == zone.plateID }
 
-        if layout.stacked {
+        VStack(alignment: .leading, spacing: 8) {
+            if let virtualPlate { VirtualPlateNameField(model: model, plate: virtualPlate) }
+            if layout.stacked {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 10) {
                     heading(number: number, monitor: monitor, compact: true)
@@ -188,7 +149,7 @@ private struct ZoneFace: View {
                     LinkButton(title: "Reset monitor") { model.resetSelectedMonitor() }.frame(height: 24)
                 }
             }
-        } else if layout.wide {
+            } else if layout.wide {
             let unit = inner / 3.45
             HStack(alignment: .top, spacing: 0) {
                 identity(number: number, monitor: monitor)
@@ -204,7 +165,7 @@ private struct ZoneFace: View {
                     .frame(maxWidth: .infinity, alignment: .topLeading)
             }
             .fixedSize(horizontal: false, vertical: true)
-        } else {
+            } else {
             // 860 to 1000: still three columns, so the drawer stays short and the desk leads.
             // The path drops out and the zone actions become icon buttons, as at 640.
             let rest = inner - 220 - 96
@@ -232,6 +193,7 @@ private struct ZoneFace: View {
                 .frame(maxWidth: .infinity, alignment: .topLeading)
             }
             .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -239,8 +201,10 @@ private struct ZoneFace: View {
         HStack(spacing: 4) {
             Button { model.splitSelectedZone(vertical: true) } label: { Icon(kind: .splitV) }
                 .buttonStyle(IconButtonStyle()).help("Split vertically").accessibilityLabel("Split vertically")
+                .disabled(!zone.isSplittableHorizontally)
             Button { model.splitSelectedZone(vertical: false) } label: { Icon(kind: .splitH) }
                 .buttonStyle(IconButtonStyle()).help("Split horizontally").accessibilityLabel("Split horizontally")
+                .disabled(!zone.isSplittableVertically)
             Button { model.deleteSelectedZone() } label: { Icon(kind: .delete) }
                 .buttonStyle(IconButtonStyle(danger: true))
                 .disabled(!model.canDeleteSelectedZone())
@@ -307,10 +271,12 @@ private struct ZoneFace: View {
                     HStack(spacing: 6) { Icon(kind: .splitV); Text("Split vertically") }
                 }
                 .buttonStyle(InkButtonStyle())
+                .disabled(!zone.isSplittableHorizontally)
                 Button { model.splitSelectedZone(vertical: false) } label: {
                     HStack(spacing: 6) { Icon(kind: .splitH); Text("Split horizontally") }
                 }
                 .buttonStyle(InkButtonStyle())
+                .disabled(!zone.isSplittableVertically)
                 Button { model.deleteSelectedZone() } label: {
                     HStack(spacing: 6) { Icon(kind: .delete); Text("Delete zone") }
                 }
@@ -332,7 +298,8 @@ private struct ZoneFace: View {
         let current = model.presetMatch(on: key, in: workspace)
         let presets = SettingsModel.designerPresets
         let groups = [presets.prefix(4), presets[4..<6], presets[6..<7], presets.suffix(from: 7)]
-        return WrapLayout(spacing: 10, lineSpacing: 4) {
+        return VStack(alignment: .leading, spacing: 8) {
+          WrapLayout(spacing: 10, lineSpacing: 4) {
             ForEach(groups.indices, id: \.self) { index in
                 HStack(spacing: 4) {
                     ForEach(groups[index]) { preset in
@@ -342,11 +309,120 @@ private struct ZoneFace: View {
                     }
                 }
             }
+          }
+          WrapLayout(spacing: 8, lineSpacing: 6) {
+              GridTool(model: model)
+              Button("Fill free space") { model.fillFreeSpace() }
+                  .buttonStyle(InkButtonStyle())
+                  .disabled(model.freeSpace == nil)
+                  .help("Add a slot in the largest empty rectangle. Existing slots stay in place.")
+              Button("Undo") { model.undoLayout() }
+                  .buttonStyle(InkButtonStyle(kind: .quiet))
+                  .disabled(!model.canUndoLayout)
+              Button("Redo") { model.redoLayout() }
+                  .buttonStyle(InkButtonStyle(kind: .quiet))
+                  .disabled(!model.canRedoLayout)
+          }
         }
     }
 
     private func nowText(_ key: String) -> String {
         "Now: " + (model.presetMatch(on: key, in: workspace)?.name ?? "custom")
+    }
+}
+
+private struct VirtualPlateNameField: View {
+    @Bindable var model: SettingsModel
+    let plate: VirtualPlate
+    @FocusState private var focused: Bool
+    @State private var draftName: String
+
+    init(model: SettingsModel, plate: VirtualPlate) {
+        self.model = model
+        self.plate = plate
+        _draftName = State(initialValue: plate.name)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("Virtual plate").font(T.font(T.type.small, .semibold)).foregroundStyle(P.ink2)
+            InkTextField(text: $draftName, font: T.font(T.type.body, .semibold), focus: $focused)
+                .frame(width: 220, height: 30)
+                .box(invalid: draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityLabel("Virtual plate name")
+                .onChange(of: draftName) { _, value in model.renameVirtualPlate(plate.id, to: value) }
+                .onChange(of: plate.name) { _, value in if !focused { draftName = value } }
+                .onSubmit { focused = false }
+            if draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text("Enter a name.").font(T.font(T.type.small, .semibold)).foregroundStyle(P.error)
+            }
+        }
+        .onChange(of: model.focusVirtualPlateName) { _, request in
+            guard request else { return }
+            focused = true
+            model.focusVirtualPlateName = false
+        }
+    }
+}
+
+private struct GridTool: View {
+    @Bindable var model: SettingsModel
+    @State private var showing = false
+    @State private var columns = "5"
+    @State private var rows = "2"
+
+    private var grid: LayoutPreset? {
+        guard let columns = Int(columns), let rows = Int(rows) else { return nil }
+        return PresetCatalog.grid(columns: columns, rows: rows)
+    }
+
+    var body: some View {
+        Button("Custom grid…") { showing.toggle() }
+            .buttonStyle(InkButtonStyle())
+            .help("Create evenly sized columns and rows on this monitor.")
+            .popover(isPresented: $showing) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Custom grid").font(T.font(T.type.heading, .bold))
+                    countField("Columns", text: $columns)
+                    countField("Rows", text: $rows)
+                    Text(grid.map { "\($0.zones.count) equal slots. Replaces this monitor’s layout; assigned programs carry across in order." }
+                         ?? "Enter whole numbers from 1 to 20.")
+                        .font(T.font(T.type.small)).foregroundStyle(P.ink2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Button("Cancel") { showing = false }.buttonStyle(InkButtonStyle(kind: .quiet))
+                        Spacer()
+                        Button("Create grid") {
+                            guard let grid else { return }
+                            model.applyPreset(grid)
+                            showing = false
+                        }.buttonStyle(InkButtonStyle(kind: .primary)).disabled(grid == nil)
+                    }
+                }
+                .font(T.font(T.type.body))
+                .foregroundStyle(P.ink)
+                .padding(16)
+                .frame(width: 280)
+                .background(P.drawerFace)
+            }
+    }
+
+    private func countField(_ label: String, text: Binding<String>) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+            Spacer()
+            TextField(label, text: text)
+                .textFieldStyle(.plain)
+                .multilineTextAlignment(.trailing)
+                .padding(8)
+                .frame(width: 56)
+                .box()
+                .accessibilityLabel("\(label), 1 to 20")
+            Stepper(label, value: Binding(get: { Int(text.wrappedValue) ?? 1 }, set: { text.wrappedValue = "\($0)" }), in: 1...20)
+                .labelsHidden()
+                .fixedSize()
+                .accessibilityLabel("Adjust \(label.lowercased())")
+        }
     }
 }
 
@@ -430,7 +506,19 @@ private struct PositionFields: View {
     var body: some View {
         let fault = model.fault(of: zone)
         VStack(alignment: .leading, spacing: 0) {
-            if !compact { Eyebrow("Position and size, % of work area").padding(.bottom, 6) }
+            HStack(spacing: 8) {
+                if !compact { Eyebrow("Position and size") }
+                Spacer(minLength: 0)
+                Picker("Measurements", selection: $model.measurementUnit) {
+                    Text("Percent").tag(SettingsModel.MeasurementUnit.percent)
+                    Text("Pixels").tag(SettingsModel.MeasurementUnit.pixels)
+                        .disabled(!model.canMeasurePixels)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
+                .help("Measurements use the monitor’s work area, excluding the menu bar and Dock. Pixels require a connected monitor.")
+            }.padding(.bottom, 6)
             if compact {
                 HStack(spacing: 6) {
                     ForEach(SettingsModel.Field.allCases, id: \.self) { field in
@@ -467,7 +555,7 @@ private struct PositionFields: View {
         var detail = ""
         var fits = false
         switch fault {
-        case .empty: lead = "Width and Height must be more than 0%."
+        case .empty: lead = "Width and Height must each be at least 1% of the work area."
         case .negative: lead = "Left and Top cannot be below 0%."
         case .pastRight:
             lead = "Width takes zone \(number) past the right edge of \(name)."
@@ -506,16 +594,17 @@ private struct PercentField: View {
         self.bad = bad
         self.compact = compact
         let raw: Double = switch field { case .x: zone.x; case .y: zone.y; case .w: zone.w; case .h: zone.h }
-        _text = State(initialValue: Percent.text(raw))
+        _text = State(initialValue: model.unitSymbol == "px" ? String(format: "%.0f", model.displayValue(field, for: zone)) : Percent.text(raw))
     }
 
     private var value: Double {
-        switch field {
-        case .x: zone.x
-        case .y: zone.y
-        case .w: zone.w
-        case .h: zone.h
-        }
+        model.displayValue(field, for: zone)
+    }
+
+    private var formattedValue: String {
+        model.unitSymbol == "px" ? String(format: "%.0f", value) : String(format: "%.2f", value)
+            .replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\.$", with: "", options: .regularExpression)
     }
 
     private var label: String {
@@ -540,7 +629,7 @@ private struct PercentField: View {
             InkTextField(text: $text, font: T.font(T.type.tab, .semibold).monospacedDigit(),
                          alignment: .trailing, focus: $focused)
                 .padding(.horizontal, 2)
-            Text("%")
+            Text(model.unitSymbol)
                 .font(T.font(T.type.body))
                 .foregroundStyle(P.ink2)
                 .padding(.leading, compact ? 1 : 2)
@@ -556,23 +645,27 @@ private struct PercentField: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { focused = true }
-        .onChange(of: value) { _, newValue in if !focused { text = Percent.text(newValue) } }
-        .onChange(of: zone.id) { _, _ in text = Percent.text(value) }
+        .onChange(of: value) { _, _ in if !focused { text = formattedValue } }
+        .onChange(of: zone.id) { _, _ in model.endGeometryEdit(); text = formattedValue }
+        .onChange(of: model.unitSymbol) { _, _ in model.endGeometryEdit(); text = formattedValue }
         .onChange(of: text) { _, newValue in
             // The field shows one decimal of a value stored to two; only a real edit may write
             // back, or merely showing 33.3 would overwrite 33.33.
-            guard focused, newValue != Percent.text(value),
+            guard focused, newValue != formattedValue,
                   let parsed = Double(newValue.replacingOccurrences(of: ",", with: ".")) else { return }
-            if abs(parsed - value) > 0.001 { model.setValue(field, parsed) }
+            if abs(parsed - value) > 0.001 { model.setDisplayValue(field, parsed) }
         }
-        .onChange(of: focused) { _, isFocused in if !isFocused { text = Percent.text(value) } }
+        .onChange(of: focused) { _, isFocused in
+            if isFocused { model.beginGeometryEdit(); text = formattedValue }
+            else { model.endGeometryEdit(); text = formattedValue }
+        }
         .onChange(of: model.focusRequest) { _, request in
             guard request == .field(field) else { return }
             focused = true
             model.focusRequest = nil
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(label), percent")
+        .accessibilityLabel("\(label), \(model.unitSymbol == "px" ? "pixels" : "percent")")
     }
 }
 
@@ -587,7 +680,6 @@ private struct SettingsFace: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Slotter settings").font(T.font(T.type.select, .extraBold)).foregroundStyle(P.ink).padding(.bottom, 0)
                 login
-                shortcuts
                 accessibility
             }
         } else {
@@ -598,10 +690,6 @@ private struct SettingsFace: View {
                 }
                 .padding(.trailing, 24)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
-                Rectangle().fill(P.rule).frame(width: 1)
-                shortcuts
-                    .padding(.horizontal, 24)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 Rectangle().fill(P.rule).frame(width: 1)
                 accessibility
                     .padding(.leading, 24)
@@ -632,26 +720,6 @@ private struct SettingsFace: View {
         }
     }
 
-    private var shortcuts: some View {
-        let status = model.status
-        return VStack(alignment: .leading, spacing: 4) {
-            Text("Snap shortcuts").font(T.font(T.type.body, .bold)).foregroundStyle(P.ink)
-            HStack(spacing: 6) {
-                Kbd("⌃ ⌥ ←")
-                Text("left half, and \(max(0, status.shortcutCount - 1)) more")
-                    .font(T.font(T.type.small)).foregroundStyle(P.ink2)
-            }
-            if !status.accessibilityTrusted {
-                StateLine(ok: false, text: "Off until Accessibility is granted.")
-            } else if status.shortcutFailures > 0 {
-                StateLine(ok: false, text: "\(status.shortcutFailures) unavailable: another app holds \(status.shortcutFailures == 1 ? "it" : "them"). Rebind in profiles.ini.")
-            } else {
-                StateLine(ok: true, text: "Ready. Halves, thirds and corners from anywhere.")
-            }
-        }
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
     private var accessibility: some View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
@@ -659,7 +727,7 @@ private struct SettingsFace: View {
                 if model.status.accessibilityTrusted {
                     StateLine(ok: true, text: "Granted. Slotter can move windows.")
                 } else {
-                    StateLine(ok: false, text: "Not granted. Slotter cannot move windows until it is.")
+                    StateLine(ok: false, text: "Not granted. Slotter cannot move other apps’ windows until it is.")
                 }
             }
             .fixedSize(horizontal: false, vertical: true)
@@ -668,8 +736,6 @@ private struct SettingsFace: View {
                     Button("Open System Settings") { model.actions.openAccessibilitySettings() }
                         .buttonStyle(InkButtonStyle())
                 }
-                Button("Manage programs…") { model.showingPrograms = true }
-                    .buttonStyle(InkButtonStyle(kind: .quiet))
             }
         }
     }
@@ -703,5 +769,184 @@ private struct Kbd: View {
             .overlay(RoundedRectangle(cornerRadius: T.radii.chip).strokeBorder(P.fieldBorder, lineWidth: 1))
             .overlay(alignment: .bottom) { Rectangle().fill(P.fieldBorder).frame(height: 1).padding(.horizontal, 2) }
             .fixedSize()
+    }
+}
+
+private struct ShortcutsFace: View {
+    @Bindable var model: SettingsModel
+    let layout: DesignerLayout
+    @State private var recorder = ShortcutRecorder()
+
+    private let groups: [ShortcutGroup] = [
+        ShortcutGroup(title: "Halves", actions: [.leftHalf, .rightHalf, .topHalf, .bottomHalf]),
+        ShortcutGroup(title: "Corners", actions: [.topLeft, .topRight, .bottomLeft, .bottomRight]),
+        ShortcutGroup(title: "Thirds", actions: [.leftThird, .centreThird, .rightThird, .leftTwoThirds, .rightTwoThirds]),
+        ShortcutGroup(title: "Other", actions: [.maximise, .centre, .restore]),
+        ShortcutGroup(title: "Displays", actions: [.nextDisplay, .previousDisplay]),
+    ]
+
+    private var columns: [ShortcutColumn] {
+        [ShortcutColumn(id: "layout", groups: Array(groups[0...1])),
+         ShortcutColumn(id: "sizes", groups: Array(groups[2...3])),
+         ShortcutColumn(id: "displays", groups: [groups[4]])]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Snap shortcuts").font(T.font(T.type.heading, .extraBold)).foregroundStyle(P.ink)
+                Spacer(minLength: 12)
+                if MagnetLayouts.table(overrides: model.shortcuts) != MagnetLayouts.defaults {
+                    LinkButton(title: "Reset all") { model.resetShortcuts() }
+                }
+            }
+            HStack(alignment: .top, spacing: layout.stacked ? 10 : 30) {
+                ForEach(columns) { column in
+                    VStack(alignment: .leading, spacing: 14) {
+                        ForEach(column.groups) { group in
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text(group.title).font(T.font(T.type.body, .bold)).foregroundStyle(P.ink2)
+                                ForEach(group.actions, id: \.self) { action in
+                                    ShortcutRow(model: model, action: action, recorder: recorder)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+            }
+        }
+        .onDisappear { recorder.cancel() }
+    }
+}
+
+private struct ShortcutGroup: Identifiable {
+    let title: String
+    let actions: [SnapAction]
+    var id: String { title }
+}
+
+private struct ShortcutColumn: Identifiable {
+    let id: String
+    let groups: [ShortcutGroup]
+}
+
+private struct ShortcutRow: View {
+    @Bindable var model: SettingsModel
+    let action: SnapAction
+    let recorder: ShortcutRecorder
+
+    private var combo: KeyCombo? { MagnetLayouts.table(overrides: model.shortcuts)[action] }
+    private var differsFromDefault: Bool { combo != MagnetLayouts.defaults[action] }
+    private var unavailable: Bool { model.status.unavailableShortcuts.contains(action.rawValue) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Text(action.title)
+                    .font(T.font(T.type.small, .semibold))
+                    .foregroundStyle(P.ink)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button {
+                    recorder.begin(action) { target, value in
+                        if let value,
+                           let conflict = ShortcutRules.conflict(for: value, excluding: target,
+                                                                 overrides: model.shortcuts) {
+                            recorder.showConflict("Already used by \(conflict.title). Rebind that action first.")
+                        } else {
+                            model.setShortcut(target, combo: value)
+                        }
+                    }
+                } label: {
+                    Kbd(recorder.recording == action ? "Press keys…" : (combo?.display ?? "Unbound"))
+                }
+                .buttonStyle(.plain)
+                .help("Record a shortcut for \(action.title)")
+                .accessibilityLabel("\(action.title), \(combo?.display ?? "unbound"). Record shortcut")
+                if differsFromDefault {
+                    LinkButton(title: "Reset", size: T.type.caption) { model.resetShortcut(action) }
+                }
+            }
+            if recorder.action == action, let error = recorder.error {
+                StateLine(ok: false, text: error)
+            } else if unavailable {
+                StateLine(ok: false, text: "Unavailable: another app holds this shortcut.")
+            }
+        }
+    }
+}
+
+@MainActor
+@Observable
+private final class ShortcutRecorder {
+    private(set) var recording: SnapAction?
+    private(set) var action: SnapAction?
+    private(set) var error: String?
+    @ObservationIgnored private var monitor: Any?
+    @ObservationIgnored private var onCapture: ((SnapAction, KeyCombo?) -> Void)?
+
+    func begin(_ action: SnapAction, onCapture: @escaping (SnapAction, KeyCombo?) -> Void) {
+        cancel()
+        self.action = action
+        recording = action
+        error = nil
+        self.onCapture = onCapture
+        ShortcutCenter.shared.suspendForRecording()
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let keyCode = event.keyCode
+            let modifierFlags = event.modifierFlags.rawValue
+            let consumed = MainActor.assumeIsolated {
+                self?.consume(keyCode: keyCode, modifierFlags: modifierFlags) ?? false
+            }
+            return consumed ? nil : event
+        }
+    }
+
+    func showConflict(_ message: String) { error = message }
+
+    func cancel() {
+        guard recording != nil else { action = nil; error = nil; return }
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        recording = nil
+        onCapture = nil
+        ShortcutCenter.shared.resumeAfterRecording()
+    }
+
+    private func finish() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        recording = nil
+        onCapture = nil
+        ShortcutCenter.shared.resumeAfterRecording()
+    }
+
+    private func consume(keyCode: UInt16, modifierFlags: UInt) -> Bool {
+        guard let target = recording else { return false }
+        let flags = NSEvent.ModifierFlags(rawValue: modifierFlags)
+            .intersection(.deviceIndependentFlagsMask)
+        if keyCode == UInt16(kVK_Escape) {
+            cancel()
+            return true
+        }
+        if flags.isEmpty, [UInt16(kVK_Delete), UInt16(kVK_ForwardDelete)].contains(keyCode) {
+            onCapture?(target, nil)
+            finish()
+            return true
+        }
+
+        var modifiers: UInt32 = 0
+        if flags.contains(.control) { modifiers |= UInt32(controlKey) }
+        if flags.contains(.option) { modifiers |= UInt32(optionKey) }
+        if flags.contains(.shift) { modifiers |= UInt32(shiftKey) }
+        if flags.contains(.command) { modifiers |= UInt32(cmdKey) }
+        guard modifiers != 0 else {
+            error = "Add at least one modifier. Press Escape to cancel."
+            return true
+        }
+        onCapture?(target, KeyCombo(keyCode: UInt32(keyCode), modifiers: modifiers))
+        finish()
+        return true
     }
 }

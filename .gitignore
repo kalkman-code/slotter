@@ -1,5 +1,7 @@
 graphify-out/
 artifacts/
+dist/
+.build/
 bin/
 obj/
 slotter.log

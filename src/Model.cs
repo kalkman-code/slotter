@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
@@ -16,16 +17,18 @@ namespace Slotter
         public string MonKey;
         public double X, Y, W, H;
         public string Prog; // library program name, or null if this zone is a manual snap target only
+        public string PlateId;
 
         public Zone Clone()
         {
-            return new Zone { Name = Name, Mon = Mon, MonKey = MonKey, X = X, Y = Y, W = W, H = H, Prog = Prog };
+            return new Zone { Name = Name, Mon = Mon, MonKey = MonKey, X = X, Y = Y, W = W, H = H, Prog = Prog, PlateId = PlateId };
         }
     }
 
     // A reusable named program in the [Programs] library.
     public class ProgItem
     {
+        public Guid Id { get; set; } = Guid.NewGuid();
         public string Name { get; set; }
         public string Exe { get; set; }
         public string Args { get; set; }
@@ -38,16 +41,30 @@ namespace Slotter
     {
         public string Name { get; set; }
         public List<Zone> Zones = new List<Zone>();
+        public List<VirtualPlate> VirtualPlates = new List<VirtualPlate>();
 
         public Profile Clone()
         {
             Profile p = new Profile { Name = Name };
             foreach (Zone z in Zones) p.Zones.Add(z.Clone());
+            foreach (VirtualPlate plate in VirtualPlates) p.VirtualPlates.Add(plate.Clone());
             return p;
         }
 
         // WPF falls back to ToString() for a ListBoxItem's accessible name.
         public override string ToString() { return Name; }
+    }
+
+    public class VirtualPlate
+    {
+        public string Id;
+        public string Name;
+        public string MonKey;
+        public int Mon;
+        public string DesktopId;
+
+        public VirtualPlate Clone() { return (VirtualPlate)MemberwiseClone(); }
+        public bool Benched { get { return string.IsNullOrEmpty(DesktopId); } }
     }
 
     public class LaunchResult
@@ -99,10 +116,6 @@ namespace Slotter
                     "List=Example",
                     "",
                     "[Example]",
-                    "Zone1=1,0,0,50,100",
-                    "Zone2=1,50,0,50,100",
-                    "Prog1=Notepad",
-                    "Prog2=Paint",
                     "",
                     "[Panel]",
                     "LastProfile=Example",
@@ -152,15 +165,59 @@ namespace Slotter
                             w = Clamp(w, 1, 100 - x); h = Clamp(h, 1, 100 - y);
                             string prog = IniRead(name, "Prog" + i, "").Trim();
                             string monKey = IniRead(name, "MonKey" + i, "").Trim();
-                            p.Zones.Add(new Zone { Name = "Zone" + i, Mon = mon, MonKey = monKey, X = x, Y = y, W = w, H = h, Prog = prog.Length > 0 ? prog : null });
+                            p.Zones.Add(new Zone { Name = "Zone" + i, Mon = mon, MonKey = monKey, X = x, Y = y, W = w, H = h, Prog = prog.Length > 0 ? prog : null, PlateId = IniRead(name, "PlateId" + i, "").Trim() });
                         }
                         else Log.Write("bad zone line in [" + name + "]: " + v);
                     }
                     list.Add(p);
+                    int plateCount;
+                    int.TryParse(IniRead(name, "VirtualPlateCount", "0"), out plateCount);
+                    for (int i = 1; i <= Math.Max(0, Math.Min(plateCount, 500)); i++)
+                    {
+                        string id = IniRead(name, "VirtualPlateId" + i, "").Trim();
+                        Guid parsed;
+                        int plateMon;
+                        if (!Guid.TryParse(id, out parsed)) continue;
+                        p.VirtualPlates.Add(new VirtualPlate
+                        {
+                            Id = parsed.ToString(), Name = IniRead(name, "VirtualPlateName" + i, "Desktop").Trim(),
+                            Mon = int.TryParse(IniRead(name, "VirtualPlateMonitor" + i, "1"), out plateMon) ? plateMon : 1,
+                            MonKey = IniRead(name, "VirtualPlateMonKey" + i, "").Trim(),
+                            DesktopId = IniRead(name, "VirtualPlateDesktop" + i, "").Trim()
+                        });
+                    }
                 }
             }
             catch (Exception ex) { Log.Write("config load: " + ex.Message); }
             return list;
+        }
+
+        public static bool MigrateReservedProfiles(List<Profile> profiles, Dictionary<string, string> bindings)
+        {
+            Dictionary<string, string> renamed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (Profile profile in profiles)
+            {
+                if (!string.Equals(profile.Name, "DesktopBindings", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(profile.Name, "Shortcuts", StringComparison.OrdinalIgnoreCase)) continue;
+                string baseName = profile.Name + " workspace";
+                string name = baseName;
+                for (int suffix = 2; FindProfile(profiles, name) != null; suffix++)
+                    name = baseName + " " + suffix;
+                renamed[profile.Name] = name;
+                profile.Name = name;
+            }
+            if (renamed.Count == 0) return true;
+
+            Dictionary<SnapAction, KeyCombo> shortcuts = ShortcutTable.Read();
+            bool ok = SaveProfiles(profiles);
+            string last = IniRead("Panel", "LastProfile", "");
+            string migrated;
+            if (renamed.TryGetValue(last, out migrated)) ok &= IniWrite("Panel", "LastProfile", migrated);
+            foreach (string id in bindings.Keys.ToArray())
+                if (renamed.TryGetValue(bindings[id], out migrated)) bindings[id] = migrated;
+            ok &= WriteDesktopBindings(bindings);
+            ok &= WriteShortcuts(shortcuts);
+            return ok;
         }
 
         public static bool SaveProfiles(List<Profile> list)
@@ -183,7 +240,18 @@ namespace Slotter
                         Zone z = p.Zones[i];
                         ok &= IniWrite(p.Name, "Zone" + (i + 1), string.Format(CultureInfo.InvariantCulture, "{0},{1},{2},{3},{4}", z.Mon, Trim(z.X), Trim(z.Y), Trim(z.W), Trim(z.H)));
                         ok &= IniWrite(p.Name, "MonKey" + (i + 1), z.MonKey ?? "");
+                        ok &= IniWrite(p.Name, "PlateId" + (i + 1), z.PlateId ?? "");
                         if (!string.IsNullOrEmpty(z.Prog)) ok &= IniWrite(p.Name, "Prog" + (i + 1), z.Prog);
+                    }
+                    ok &= IniWrite(p.Name, "VirtualPlateCount", p.VirtualPlates.Count.ToString(CultureInfo.InvariantCulture));
+                    for (int i = 0; i < p.VirtualPlates.Count; i++)
+                    {
+                        VirtualPlate plate = p.VirtualPlates[i];
+                        ok &= IniWrite(p.Name, "VirtualPlateId" + (i + 1), plate.Id);
+                        ok &= IniWrite(p.Name, "VirtualPlateName" + (i + 1), plate.Name);
+                        ok &= IniWrite(p.Name, "VirtualPlateMonitor" + (i + 1), plate.Mon.ToString(CultureInfo.InvariantCulture));
+                        ok &= IniWrite(p.Name, "VirtualPlateMonKey" + (i + 1), plate.MonKey ?? "");
+                        ok &= IniWrite(p.Name, "VirtualPlateDesktop" + (i + 1), plate.DesktopId ?? "");
                     }
                 }
                 return ok;
@@ -225,6 +293,44 @@ namespace Slotter
                 return ok;
             }
             catch (Exception ex) { Log.Write("write programs: " + ex.Message); return false; }
+        }
+
+        public static Dictionary<string, string> ReadDesktopBindings()
+        {
+            Dictionary<string, string> bindings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            string raw = IniRead("DesktopBindings", "List", "");
+            foreach (string idText in raw.Split(','))
+            {
+                Guid id;
+                if (!Guid.TryParse(idText.Trim(), out id)) continue;
+                string name = IniRead("DesktopBindings", id.ToString(), "").Trim();
+                if (name.Length > 0) bindings[id.ToString()] = name;
+            }
+            return bindings;
+        }
+
+        public static bool WriteDesktopBindings(Dictionary<string, string> bindings)
+        {
+            List<string> entries = new List<string>();
+            bool ok = WritePrivateProfileString("DesktopBindings", null, null, IniPath);
+            foreach (KeyValuePair<string, string> pair in bindings.OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                Guid id;
+                if (Guid.TryParse(pair.Key, out id) && !string.IsNullOrWhiteSpace(pair.Value))
+                {
+                    entries.Add(id.ToString());
+                    ok &= IniWrite("DesktopBindings", id.ToString(), pair.Value.Trim());
+                }
+            }
+            return ok & IniWrite("DesktopBindings", "List", string.Join(",", entries.ToArray()));
+        }
+
+        public static bool WriteShortcuts(Dictionary<SnapAction, KeyCombo> table)
+        {
+            bool ok = WritePrivateProfileString("Shortcuts", null, null, IniPath);
+            foreach (SnapAction action in ShortcutTable.All)
+                ok &= IniWrite("Shortcuts", action.ToString(), ShortcutTable.ToIni(table, action));
+            return ok;
         }
 
         public static double Clamp(double value, double min, double max) { return Math.Max(min, Math.Min(max, value)); }
@@ -273,6 +379,39 @@ namespace Slotter
             if (p.Zones.Count == 0) return true;
             foreach (Zone z in p.Zones) if (ResolveScreenIndex(z, screens) < 0) return false;
             return true;
+        }
+
+        public static Profile ForDesktop(Profile profile, Guid? desktopId)
+        {
+            if (profile == null) return profile;
+            if (!desktopId.HasValue)
+            {
+                Profile physical = new Profile { Name = profile.Name };
+                physical.Zones.AddRange(profile.Zones.Where(z => string.IsNullOrEmpty(z.PlateId)));
+                return physical;
+            }
+            Dictionary<string, string> pinned = profile.VirtualPlates
+                .Where(p => !p.Benched && string.Equals(p.DesktopId, desktopId.Value.ToString(), StringComparison.OrdinalIgnoreCase))
+                .GroupBy(p => p.MonKey ?? p.Mon.ToString(CultureInfo.InvariantCulture), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First().Id, StringComparer.OrdinalIgnoreCase);
+            if (pinned.Count == 0)
+            {
+                Profile physical = new Profile { Name = profile.Name };
+                physical.Zones.AddRange(profile.Zones.Where(z => string.IsNullOrEmpty(z.PlateId)));
+                return physical;
+            }
+            Profile resolved = new Profile { Name = profile.Name };
+            foreach (Zone zone in profile.Zones)
+            {
+                string key = zone.MonKey ?? zone.Mon.ToString(CultureInfo.InvariantCulture);
+                string plate;
+                if (pinned.TryGetValue(key, out plate))
+                {
+                    if (string.Equals(zone.PlateId, plate, StringComparison.OrdinalIgnoreCase)) resolved.Zones.Add(zone);
+                }
+                else if (string.IsNullOrEmpty(zone.PlateId)) resolved.Zones.Add(zone);
+            }
+            return resolved;
         }
     }
 }

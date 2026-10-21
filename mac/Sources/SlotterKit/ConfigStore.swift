@@ -10,7 +10,7 @@ public final class ConfigStore {
 
     nonisolated public static let url: URL = directory.appending(path: "profiles.ini")
 
-    private static let zoneKeyPrefixes = ["zone", "monkey", "monuuid", "mondup", "prog"]
+    private static let zoneKeyPrefixes = ["zone", "monkey", "monuuid", "mondup", "prog", "zoneplate"]
 
     private var source: DispatchSourceFileSystemObject?
     private var descriptor: CInt = -1
@@ -35,18 +35,8 @@ public final class ConfigStore {
             return
         }
 
-        let monitor = DisplayRegistry.current.displays.first
-        let reference = monitor.map { DisplayRegistry.reference(for: $0) } ?? MonitorRef(ordinal: 1)
-        let config = SlotterConfig(
-            workspaces: [Workspace(name: "Example", zones: [
-                Zone(monitor: reference, x: 0, y: 0, w: 50, h: 100, program: "Safari"),
-                Zone(monitor: reference, x: 50, y: 0, w: 50, h: 100, program: "Finder"),
-            ])],
-            programs: [
-                Program(name: "Safari", path: "/Applications/Safari.app"),
-                Program(name: "Finder", path: "/System/Library/CoreServices/Finder.app"),
-            ],
-            lastWorkspace: "Example")
+        let config = SlotterConfig(workspaces: [Workspace(name: "Workspace 1")],
+                                   lastWorkspace: "Workspace 1")
 
         var document = IniDocument(text: Self.header)
         write(config, into: &document)
@@ -59,7 +49,14 @@ public final class ConfigStore {
         return Self.parse(IniDocument(text: text))
     }
 
-    public func save(_ config: SlotterConfig) {
+    func serializedConfig(_ config: SlotterConfig, preserving text: String = "") -> String {
+        var document = IniDocument(text: text.isEmpty ? Self.header : text)
+        write(config, into: &document)
+        return document.serialized()
+    }
+
+    @discardableResult
+    public func save(_ config: SlotterConfig) -> Bool {
         var document: IniDocument
         if let text = try? String(contentsOf: Self.url, encoding: .utf8) {
             document = IniDocument(text: text)
@@ -82,8 +79,10 @@ public final class ConfigStore {
             try document.serialized().write(to: Self.url, atomically: true, encoding: .utf8)
         } catch {
             Log.error("save config: \(error.localizedDescription)")
+            return false
         }
         restartWatchingIfNeeded()
+        return true
     }
 
     public func startWatching() {
@@ -146,8 +145,21 @@ public final class ConfigStore {
                     pairs.append(("MonDup\(n)", String(clamped.monitor.duplicateIndex)))
                 }
                 if let program = clamped.program, !program.isEmpty { pairs.append(("Prog\(n)", program)) }
+                if let plateID = clamped.plateID { pairs.append(("ZonePlate\(n)", plateID.uuidString)) }
             }
-            document.replaceSection(workspace.name, removingKeysMatching: Self.isZoneKey, with: pairs)
+            pairs.insert(("WorkspaceID", workspace.id.uuidString), at: 0)
+            for (index, plate) in workspace.virtualPlates.enumerated() {
+                let n = index + 1
+                pairs.append(("VirtualPlate\(n)ID", plate.id.uuidString))
+                pairs.append(("VirtualPlate\(n)Name", plate.name))
+                pairs.append(("VirtualPlate\(n)Desktop", plate.desktopID ?? ""))
+                pairs.append(("VirtualPlate\(n)Monitor", "\(plate.monitor.ordinal)|\(plate.monitor.uuid ?? "")|\(plate.monitor.legacyKey ?? "")|\(plate.monitor.duplicateIndex)"))
+            }
+            pairs.append(("VirtualPlateCount", String(workspace.virtualPlates.count)))
+            document.replaceSection(workspace.name, removingKeysMatching: {
+                $0.caseInsensitiveCompare("WorkspaceID") == .orderedSame || Self.isZoneKey($0)
+                    || $0.lowercased().hasPrefix("virtualplate")
+            }, with: pairs)
         }
 
         var programPairs: [(key: String, value: String)] = [("Count", String(config.programs.count))]
@@ -160,20 +172,19 @@ public final class ConfigStore {
         }
         document.replaceSection("Programs", removingKeysMatching: Self.isProgramKey, with: programPairs)
 
-        if !config.shortcuts.isEmpty {
-            let pairs = config.shortcuts.sorted { $0.key < $1.key }.map { (key: $0.key, value: $0.value) }
-            document.replaceSection("Shortcuts", removingKeysMatching: { _ in true }, with: pairs)
-        }
+        let pairs = config.shortcuts.sorted { $0.key < $1.key }.map { (key: $0.key, value: $0.value) }
+        document.replaceSection("Shortcuts", removingKeysMatching: { _ in true }, with: pairs)
+
+        document.removeSection("SpaceBindings")
     }
 
-    private static func parse(_ document: IniDocument) -> SlotterConfig {
+    static func parse(_ document: IniDocument) -> SlotterConfig {
         var config = SlotterConfig()
         config.lastWorkspace = document.string("Panel", "LastProfile")
         config.startAtLogin = document.bool("Settings", "StartAtLogin",
                                             default: document.bool("Settings", "StartWithWindows"))
 
         for (key, value) in document.pairs(in: "Shortcuts") { config.shortcuts[key] = value }
-
         let names = document.string("Profiles", "List")
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -181,7 +192,22 @@ public final class ConfigStore {
 
         for name in names {
             guard document.hasSection(name) else { continue }
-            var workspace = Workspace(name: name)
+            let stableID = UUID(uuidString: document.string(name, "WorkspaceID")) ?? UUID()
+            var workspace = Workspace(name: name, id: stableID)
+            let plateCount = document.int(name, "VirtualPlateCount")
+            if plateCount > 0 {
+                for plateIndex in 1...plateCount {
+                    let prefix = "VirtualPlate\(plateIndex)"
+                    guard let plateID = UUID(uuidString: document.string(name, "\(prefix)ID")) else { continue }
+                    let fields = document.string(name, "\(prefix)Monitor").split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+                    guard fields.count == 4, let ordinal = Int(fields[0]), let duplicate = Int(fields[3]) else { continue }
+                    workspace.virtualPlates.append(VirtualPlate(
+                        id: plateID, name: document.string(name, "\(prefix)Name"),
+                        monitor: MonitorRef(ordinal: ordinal, uuid: fields[1].isEmpty ? nil : fields[1],
+                                            legacyKey: fields[2].isEmpty ? nil : fields[2], duplicateIndex: duplicate),
+                        desktopID: document.string(name, "\(prefix)Desktop").isEmpty ? nil : document.string(name, "\(prefix)Desktop")))
+                }
+            }
             var index = 1
             while true {
                 let raw = document.string(name, "Zone\(index)")
@@ -203,7 +229,8 @@ public final class ConfigStore {
                                         legacyKey: legacy.isEmpty ? nil : legacy,
                                         duplicateIndex: duplicate),
                     x: x, y: y, w: w, h: h,
-                    program: program.isEmpty ? nil : program).clamped())
+                    program: program.isEmpty ? nil : program,
+                    plateID: UUID(uuidString: document.string(name, "ZonePlate\(index)").trimmingCharacters(in: .whitespaces))).clamped())
                 index += 1
             }
             config.workspaces.append(workspace)

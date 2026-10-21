@@ -25,12 +25,19 @@ public enum SnapTargetBuilder {
 
     public static func build(workspace: Workspace?,
                              snapshot: DisplaySnapshot) -> (zones: [SnapTarget], edges: [SnapTarget]) {
+        build(workspacesByDisplay: [:], fallback: workspace, snapshot: snapshot)
+    }
+
+    public static func build(workspacesByDisplay: [String: Workspace], fallback: Workspace?,
+                             snapshot: DisplaySnapshot) -> (zones: [SnapTarget], edges: [SnapTarget]) {
         var zones: [SnapTarget] = []
         var identifier = 0
 
-        if let workspace {
+        for display in snapshot.displays {
+            let workspace = workspacesByDisplay[display.uuid] ?? fallback
+            guard let workspace else { continue }
             for (index, zone) in workspace.zones.enumerated() {
-                guard let display = DisplayRegistry.resolve(zone.monitor, in: snapshot),
+                guard DisplayRegistry.resolve(zone.monitor, in: snapshot)?.id == display.id,
                       let frame = ZoneGeometry.bounds(for: zone, in: snapshot) else { continue }
                 let program = zone.program ?? ""
                 zones.append(SnapTarget(

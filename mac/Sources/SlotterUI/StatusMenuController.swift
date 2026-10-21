@@ -123,7 +123,7 @@ extension StatusMenuController: NSMenuDelegate {
             let warning = NSMenuItem(title: "Grant Accessibility…", action: #selector(grantAccessibility), keyEquivalent: "")
             warning.target = self
             menu.addItem(warning)
-            let explain = NSMenuItem(title: "Slotter cannot move windows until you allow it.", action: nil, keyEquivalent: "")
+            let explain = NSMenuItem(title: "Slotter cannot move other apps’ windows until you allow it.", action: nil, keyEquivalent: "")
             explain.isEnabled = false
             menu.addItem(explain)
         }
@@ -178,7 +178,7 @@ extension StatusMenuController: NSMenuDelegate {
         if LoginItem.state == .unavailable { login.isEnabled = false }
         menu.addItem(login)
 
-        if AX.isTrusted { menu.addItem(shortcutsItem()) }
+        if !shortcutRegistrations.isEmpty { menu.addItem(shortcutsItem()) }
 
         let controls = NSMenu()
         let close = NSMenuItem(title: "Close every open app", action: #selector(closeAll), keyEquivalent: "")

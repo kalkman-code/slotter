@@ -60,6 +60,30 @@ private let snapshot = DisplaySnapshot(displays: [display], flipY: 1117)
     #expect(built.edges.contains { $0.source == .edge(.maximise) })
 }
 
+@Test func dragTargetsUseTheWorkspaceBoundToEachDisplay() {
+    let second = DisplayInfo(id: 2, uuid: "SECOND-UUID", name: "Second",
+                             frameAX: CGRect(x: 1728, y: 0, width: 1728, height: 1117),
+                             workAreaAX: CGRect(x: 1728, y: 33, width: 1728, height: 1035),
+                             pointSize: CGSize(width: 1728, height: 1117),
+                             pixelSize: CGSize(width: 1728, height: 1117), isPrimary: false, duplicateIndex: 0)
+    let both = DisplaySnapshot(displays: [display, second], flipY: 1117)
+    let firstWorkspace = Workspace(name: "Writing", zones: [
+        Zone(monitor: MonitorRef(ordinal: 1, uuid: display.uuid), x: 0, y: 0, w: 100, h: 100,
+             program: "Writer")])
+    let secondWorkspace = Workspace(name: "Coding", zones: [
+        Zone(monitor: MonitorRef(ordinal: 2, uuid: second.uuid), x: 0, y: 0, w: 100, h: 100,
+             program: "Editor")])
+
+    let targets = SnapTargetBuilder.build(workspacesByDisplay: [
+        display.uuid: firstWorkspace,
+        second.uuid: secondWorkspace,
+    ], fallback: nil, snapshot: both)
+
+    #expect(targets.zones.count == 2)
+    #expect(targets.zones.map(\.caption) == ["Zone 1 · Writer", "Zone 1 · Editor"])
+    #expect(targets.zones.map(\.display) == [display.id, second.id])
+}
+
 @Test func overlappingZonesResolveToTheLastDefined() {
     let reference = MonitorRef(ordinal: 1, uuid: "TEST-UUID")
     let workspace = Workspace(name: "Overlap", zones: [

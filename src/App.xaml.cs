@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
@@ -15,13 +17,13 @@ namespace Slotter
 {
     public partial class App : Application
     {
-        public const string Version = "1.0";
+        public static readonly string Version = typeof(App)
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
 
         const int HWND_BROADCAST = 0xffff;
         const int CmdSettings = 1;
-        const int HotkeyId = 0x51A;
-        const uint HotkeyModifiers = 0x4003; // MOD_ALT | MOD_CONTROL | MOD_NOREPEAT
-        const int VK_SPACE = 0x20;
+        const int HotkeyBaseId = 0x520;
+        const uint ModNoRepeat = 0x4000;
         const int WM_HOTKEY = 0x0312;
 
         static uint commandMessage;
@@ -30,6 +32,8 @@ namespace Slotter
         Tray tray;
         SnapEngine snapEngine;
         DesignerWindow settingsWindow;
+        VirtualDesktops desktopWatcher;
+        DesktopSnapshot desktopSnapshot;
 
         List<Profile> profiles = new List<Profile>();
         List<ProgItem> programsLib = new List<ProgItem>();
@@ -37,6 +41,15 @@ namespace Slotter
         bool startWithWindows;
         bool hotkeyEnabled = true;
         bool hotkeyReady;
+        bool snapShortcutsEnabled = true;
+        bool followDesktop;
+        bool recordingShortcut;
+        bool configMigrationReady = true;
+        Dictionary<SnapAction, KeyCombo> shortcuts = ShortcutTable.Defaults();
+        readonly Dictionary<SnapAction, bool> shortcutReady = new Dictionary<SnapAction, bool>();
+        Dictionary<string, string> desktopBindings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        string manualProfile = "";
+        Guid? lastKnownDesktopId;
         int launching;
 
         public static System.Drawing.Icon TrayIcon;
@@ -106,6 +119,7 @@ namespace Slotter
 
             Config.EnsureDefault();
             LoadConfig();
+            manualProfile = activeProfile;
             Monitors.Remember();
 
             if (!Presence.IsElevated())
@@ -115,8 +129,13 @@ namespace Slotter
             Presence.ApplyStartupSetting(startWithWindows);
             ApplyHotkeySetting();
 
-            snapEngine = new SnapEngine(delegate { return Config.FindProfile(profiles, activeProfile); });
+            snapEngine = new SnapEngine(delegate { return Config.ForDesktop(Config.FindProfile(profiles, activeProfile), desktopSnapshot == null || !desktopSnapshot.Available ? null : desktopSnapshot.CurrentId); });
             snapEngine.Start();
+            desktopWatcher = new VirtualDesktops(Dispatcher);
+            desktopWatcher.Changed += OnDesktopChanged;
+            desktopSnapshot = desktopWatcher.Current;
+            lastKnownDesktopId = desktopSnapshot.CurrentId;
+            ApplyDesktopProfile();
             SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
 
             BuildTray();
@@ -153,11 +172,18 @@ namespace Slotter
 
         IntPtr OnMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
-            if (msg == WM_HOTKEY && wParam.ToInt32() == HotkeyId)
+            if (msg == WM_HOTKEY)
             {
-                handled = true;
-                LaunchActiveProfile();
-                return IntPtr.Zero;
+                int id = wParam.ToInt32();
+                int actionIndex = id - HotkeyBaseId;
+                if (actionIndex >= 0 && actionIndex < ShortcutTable.All.Length)
+                {
+                    handled = true;
+                    SnapAction action = ShortcutTable.All[actionIndex];
+                    if (action == SnapAction.LaunchWorkspace) LaunchActiveProfile();
+                    else KeySnap.Perform(action);
+                    return IntPtr.Zero;
+                }
             }
             if ((uint)msg == commandMessage)
             {
@@ -171,9 +197,42 @@ namespace Slotter
 
         void ApplyHotkeySetting()
         {
-            UnregisterHotKey(messages.Handle, HotkeyId);
-            hotkeyReady = hotkeyEnabled && RegisterHotKey(messages.Handle, HotkeyId, HotkeyModifiers, VK_SPACE);
-            if (hotkeyEnabled && !hotkeyReady) Log.Write("Ctrl+Alt+Space is already in use");
+            UnregisterShortcuts();
+            shortcutReady.Clear();
+            for (int i = 0; i < ShortcutTable.All.Length; i++)
+            {
+                SnapAction action = ShortcutTable.All[i];
+                KeyCombo combo;
+                bool enabled = action == SnapAction.LaunchWorkspace ? hotkeyEnabled : snapShortcutsEnabled;
+                bool ready = false;
+                if (!recordingShortcut && enabled && shortcuts.TryGetValue(action, out combo))
+                {
+                    uint modifiers = 0;
+                    if ((combo.Modifiers & System.Windows.Input.ModifierKeys.Alt) != 0) modifiers |= 1;
+                    if ((combo.Modifiers & System.Windows.Input.ModifierKeys.Control) != 0) modifiers |= 2;
+                    if ((combo.Modifiers & System.Windows.Input.ModifierKeys.Shift) != 0) modifiers |= 4;
+                    if ((combo.Modifiers & System.Windows.Input.ModifierKeys.Windows) != 0) modifiers |= 8;
+                    int key = System.Windows.Input.KeyInterop.VirtualKeyFromKey(combo.Key);
+                    ready = RegisterHotKey(messages.Handle, HotkeyBaseId + i, modifiers | ModNoRepeat, (uint)key);
+                    if (!ready) Log.Write("shortcut unavailable: " + action + " " + combo.Format());
+                }
+                shortcutReady[action] = ready;
+            }
+            hotkeyReady = shortcutReady.ContainsKey(SnapAction.LaunchWorkspace) && shortcutReady[SnapAction.LaunchWorkspace];
+            if (settingsWindow != null) settingsWindow.ShortcutStates(shortcutReady, hotkeyReady);
+        }
+
+        void UnregisterShortcuts()
+        {
+            if (messages == null) return;
+            foreach (SnapAction action in ShortcutTable.All)
+                UnregisterHotKey(messages.Handle, HotkeyBaseId + (int)action);
+        }
+
+        void SetShortcutRecording(bool recording)
+        {
+            recordingShortcut = recording;
+            ApplyHotkeySetting();
         }
 
         void LaunchActiveProfile()
@@ -193,17 +252,69 @@ namespace Slotter
             }));
         }
 
+        void OnDesktopChanged(DesktopSnapshot snapshot)
+        {
+            Guid? previous = lastKnownDesktopId;
+            if (previous != snapshot.CurrentId && snapEngine != null) snapEngine.CloseTargets();
+            desktopSnapshot = snapshot;
+            ApplyDesktopProfile();
+            if (snapshot.Available)
+            {
+                Guid id = snapshot.CurrentId.Value;
+                if (previous.HasValue && previous.Value != id)
+                {
+                    int ordinal = snapshot.Desktops.FindIndex(d => d.Id == id) + 1;
+                    string label = "Desktop " + (ordinal > 0 ? ordinal.ToString() : "?");
+                    Profile selected = Config.FindProfile(profiles, activeProfile);
+                    int plates = selected == null ? 0 : selected.VirtualPlates.Count(p => !p.Benched && string.Equals(p.DesktopId, id.ToString(), StringComparison.OrdinalIgnoreCase));
+                    string state = plates + (plates == 1 ? " virtual plate" : " virtual plates");
+                    Log.Write("desktop changed: " + label + " uuid=" + id + "; " + state);
+                }
+                lastKnownDesktopId = id;
+            }
+            if (settingsWindow != null) settingsWindow.DesktopState(snapshot);
+        }
+
+        void ApplyDesktopProfile()
+        {
+            string selected = manualProfile;
+            if (Config.FindProfile(profiles, selected) == null && profiles.Count > 0) selected = profiles[0].Name;
+            if (!string.Equals(activeProfile, selected, StringComparison.OrdinalIgnoreCase))
+            {
+                activeProfile = selected;
+                if (snapEngine != null) snapEngine.CloseTargets();
+                if (settingsWindow != null) settingsWindow.ActiveWorkspaceChanged(activeProfile);
+            }
+        }
+
         // ---------------------------------------------------------------- config
 
         void LoadConfig()
         {
             programsLib = Config.ReadPrograms();
             profiles = Config.ReadProfiles();
+            desktopBindings = Config.ReadDesktopBindings();
+            if (!Config.MigrateReservedProfiles(profiles, desktopBindings))
+            {
+                Log.Write("reserved workspace migration was incomplete");
+                configMigrationReady = false;
+                profiles = Config.ReadProfiles();
+            }
+            else
+            {
+                if (desktopBindings.Count > 0 || !string.IsNullOrEmpty(Config.IniRead("DesktopBindings", "List", "")))
+                    Log.Write("discarded legacy desktop bindings; virtual plates now belong to workspaces");
+                Config.WriteDesktopBindings(new Dictionary<string, string>());
+            }
             activeProfile = Config.IniRead("Panel", "LastProfile", "");
             startWithWindows = Config.IniRead("Settings", "StartWithWindows", "0") == "1";
             hotkeyEnabled = Config.IniRead("Settings", "HotkeyEnabled", "1") != "0";
+            snapShortcutsEnabled = Config.IniRead("Settings", "SnapShortcutsEnabled", "1") != "0";
+            followDesktop = false;
+            shortcuts = ShortcutTable.Read();
             if (Config.FindProfile(profiles, activeProfile) == null)
                 activeProfile = profiles.Count > 0 ? profiles[0].Name : "";
+            if (Config.FindProfile(profiles, manualProfile) == null) manualProfile = activeProfile;
         }
 
         // ------------------------------------------------------------------ tray
@@ -266,15 +377,21 @@ namespace Slotter
                 Presence.ApplyStartupSetting(startWithWindows);
             }));
 
-            MenuItem hotkey = Tray.Toggle(hotkeyEnabled && !hotkeyReady ? "Global shortcut unavailable" : "Global launch shortcut", hotkeyEnabled, delegate
+            MenuItem hotkey = Tray.Toggle(hotkeyEnabled && !hotkeyReady ? "Global launch shortcut unavailable" : "Global launch shortcut", hotkeyEnabled, delegate
             {
                 hotkeyEnabled = !hotkeyEnabled;
                 Config.IniWrite("Settings", "HotkeyEnabled", hotkeyEnabled ? "1" : "0");
                 ApplyHotkeySetting();
-                if (settingsWindow != null) settingsWindow.HotkeyState(hotkeyReady);
+                if (settingsWindow != null) settingsWindow.ShortcutStates(shortcutReady, hotkeyReady);
+                KeyCombo launchCombo;
+                string launchText = shortcuts.TryGetValue(SnapAction.LaunchWorkspace, out launchCombo)
+                    ? launchCombo.Format() + " launches the last workspace."
+                    : "The launch shortcut is unbound.";
+                string launchError = shortcuts.ContainsKey(SnapAction.LaunchWorkspace)
+                    ? "Another app holds its shortcut." : "No launch shortcut is assigned.";
                 Toast.Show(hotkeyReady ? "Shortcut ready" : hotkeyEnabled ? "Shortcut unavailable" : "Shortcut off",
-                    hotkeyReady ? "Ctrl + Alt + Space launches the last workspace." : hotkeyEnabled ? null : "You can turn it on again from this menu.",
-                    hotkeyReady, hotkeyEnabled && !hotkeyReady ? "Another app is already using Ctrl + Alt + Space." : null);
+                    hotkeyReady ? launchText : hotkeyEnabled ? null : "You can turn it on again from this menu.",
+                    hotkeyReady, hotkeyEnabled && !hotkeyReady ? launchError : null);
             });
             if (hotkeyEnabled && !hotkeyReady) hotkey.Foreground = Ui.B("B.Error");
             items.Add(hotkey);
@@ -309,6 +426,7 @@ namespace Slotter
                 return;
             }
             activeProfile = p.Name;
+            manualProfile = p.Name;
             Config.IniWrite("Panel", "LastProfile", p.Name);
             List<ProgItem> lib = programsLib;
             int apps = 0;
@@ -350,26 +468,49 @@ namespace Slotter
                 settingsWindow.Activate();
                 return;
             }
-            settingsWindow = new DesignerWindow(profiles, activeProfile, programsLib, startWithWindows, hotkeyEnabled, hotkeyReady);
+            settingsWindow = new DesignerWindow(profiles, activeProfile, programsLib, startWithWindows, hotkeyEnabled, hotkeyReady,
+                shortcuts, snapShortcutsEnabled, shortcutReady, followDesktop, desktopSnapshot, desktopBindings);
             settingsWindow.Saved += OnSettingsSaved;
+            settingsWindow.RecordingChanged += SetShortcutRecording;
+            settingsWindow.WorkspaceSet += delegate (string name)
+            {
+                Profile workspace = Config.FindProfile(profiles, name);
+                if (workspace != null) ActivateProfile(workspace);
+            };
             settingsWindow.Closed += delegate { settingsWindow = null; };
             settingsWindow.Show();
             settingsWindow.Activate();
         }
 
-        bool OnSettingsSaved(List<Profile> editedProfiles, List<ProgItem> editedLibrary, string editedActive, bool editedStartup, bool editedHotkey)
+        bool OnSettingsSaved(List<Profile> editedProfiles, List<ProgItem> editedLibrary, string editedActive, bool editedStartup, bool editedHotkey,
+            Dictionary<SnapAction, KeyCombo> editedShortcuts, bool editedSnapShortcuts, bool editedFollowDesktop,
+            Dictionary<string, string> editedBindings, Dictionary<string, string> profileRenames)
         {
+            if (!configMigrationReady)
+            {
+                Toast.Show("Settings could not be saved", "Reserved workspace migration must complete before Slotter can update profiles.ini.", false);
+                return false;
+            }
+            string renamedManual;
+            string retainedManual = profileRenames.TryGetValue(manualProfile, out renamedManual) ? renamedManual : manualProfile;
+            if (Config.FindProfile(editedProfiles, editedActive) != null) retainedManual = editedActive;
+            else if (Config.FindProfile(editedProfiles, retainedManual) == null) retainedManual = editedActive;
             bool savedProfiles = Config.SaveProfiles(editedProfiles);
             bool savedPrograms = Config.WritePrograms(editedLibrary);
             bool savedSettings = Config.IniWrite("Settings", "StartWithWindows", editedStartup ? "1" : "0")
                 & Config.IniWrite("Settings", "HotkeyEnabled", editedHotkey ? "1" : "0")
-                & Config.IniWrite("Panel", "LastProfile", editedActive);
-            if (savedProfiles && savedPrograms && savedSettings)
+                & Config.IniWrite("Settings", "SnapShortcutsEnabled", editedSnapShortcuts ? "1" : "0")
+                & Config.IniWrite("Settings", "FollowDesktop", editedFollowDesktop ? "1" : "0")
+                & Config.IniWrite("Panel", "LastProfile", retainedManual);
+            bool savedOther = Config.WriteShortcuts(editedShortcuts);
+            if (savedProfiles && savedPrograms && savedSettings && savedOther)
             {
+                manualProfile = retainedManual;
                 LoadConfig();
                 Presence.ApplyStartupSetting(startWithWindows);
                 ApplyHotkeySetting();
-                if (settingsWindow != null) settingsWindow.HotkeyState(hotkeyReady);
+                ApplyDesktopProfile();
+                if (settingsWindow != null) settingsWindow.ShortcutStates(shortcutReady, hotkeyReady);
                 return true;
             }
             Toast.Show("Settings could not be saved", "Check that Slotter can write to its folder.", false);
@@ -384,7 +525,8 @@ namespace Slotter
             {
                 SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
                 if (snapEngine != null) snapEngine.Stop();
-                UnregisterHotKey(messages.Handle, HotkeyId);
+                UnregisterShortcuts();
+                if (desktopWatcher != null) desktopWatcher.Dispose();
                 if (tray != null) tray.Dispose();
                 if (messages != null) messages.Dispose();
                 if (instance != null) { instance.Dispose(); instance = null; }

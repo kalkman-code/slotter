@@ -9,6 +9,12 @@ public final class SettingsWindowController: NSObject {
     private var window: NSWindow?
     private var model: SettingsModel?
 
+    public var canUndoLayout: Bool { model?.canUndoLayout ?? false }
+    public var canRedoLayout: Bool { model?.canRedoLayout ?? false }
+    public func undoLayout() { model?.undoLayout() }
+    public func redoLayout() { model?.redoLayout() }
+    public func flushBeforeTermination() { model?.flushOnClose() }
+
     public func show(config: SlotterConfig, status: SettingsModel.Status, openPrograms: Bool = false,
                      actions: SettingsModel.Actions) {
         if let window, let model {
@@ -57,19 +63,8 @@ public final class SettingsWindowController: NSObject {
     }
 
     private func requestClose() {
-        guard let model, model.dirty else {
-            close()
-            return
-        }
-        guard model.pendingConfirm == nil else { return }
-        model.showingPrograms = false
-        model.confirm(ConfirmRequest(
-            heading: "Discard your changes?",
-            body: "The designer has edits that are not saved.",
-            confirmTitle: "Discard changes",
-            danger: true)) { [weak self] in
-            self?.close()
-        }
+        model?.flushOnClose()
+        close()
     }
 
     private func close() {

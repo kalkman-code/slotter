@@ -8,6 +8,9 @@ BUNDLE_ID="uk.co.kalkman.slotter"
 APP="build/Slotter.app"
 INSTALL_PATH="/Applications/Slotter.app"
 OLD_APP="/Applications/Snappy.app"
+VERSION="$(tr -d '[:space:]' < ../VERSION)"
+SHORT_VERSION="${VERSION%%-*}"
+BUILD_NUMBER="$(git -C .. rev-list --count HEAD)"
 
 INSTALL=0
 for arg in "$@"; do
@@ -30,6 +33,8 @@ rm -rf "$APP" build/Slotter.iconset
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN/Slotter" "$APP/Contents/MacOS/Slotter"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $SHORT_VERSION" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 echo "==> fonts"

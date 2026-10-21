@@ -2,13 +2,13 @@ import AppKit
 import Observation
 import SlotterKit
 
-/// The designer's staged state. Nothing here reaches `profiles.ini` until `save()`, and
-/// `cancel()` puts back what was last saved.
+/// The designer's working state. Valid edits are persisted as they are made.
 @MainActor
 @Observable
 public final class SettingsModel {
-    public enum Face: Sendable { case zone, settings }
+    public enum Face: Sendable { case zone, settings, shortcuts }
     public enum Field: Sendable, CaseIterable { case x, y, w, h }
+    public enum MeasurementUnit: Sendable { case percent, pixels }
     public enum FocusTarget: Equatable, Sendable { case rename, field(Field), programPath(UUID) }
 
     public struct Renaming: Equatable, Sendable {
@@ -27,25 +27,33 @@ public final class SettingsModel {
         public var shortcutCount: Int
         public var shortcutFailures: Int
         public var loginNeedsApproval: Bool
+        public var unavailableShortcuts: [String]
+        public var spaceSnapshot: SpaceSnapshot
 
         public init(accessibilityTrusted: Bool = true, shortcutCount: Int = 0, shortcutFailures: Int = 0,
-                    loginNeedsApproval: Bool = false) {
+                    loginNeedsApproval: Bool = false, unavailableShortcuts: [String] = [],
+                    spaceSnapshot: SpaceSnapshot = SpaceSnapshot(available: false)) {
             self.accessibilityTrusted = accessibilityTrusted
             self.shortcutCount = shortcutCount
             self.shortcutFailures = shortcutFailures
             self.loginNeedsApproval = loginNeedsApproval
+            self.unavailableShortcuts = unavailableShortcuts
+            self.spaceSnapshot = spaceSnapshot
         }
     }
 
     public struct Actions {
-        public var save: (SlotterConfig) -> SlotterConfig
+        public var save: (SlotterConfig) -> SlotterConfig?
+        public var setWorkspace: (Workspace) -> Void
         public var openAccessibilitySettings: () -> Void
         public var openLoginItemsSettings: () -> Void
 
-        public init(save: @escaping (SlotterConfig) -> SlotterConfig = { $0 },
+        public init(save: @escaping (SlotterConfig) -> SlotterConfig? = { $0 },
+                    setWorkspace: @escaping (Workspace) -> Void = { _ in },
                     openAccessibilitySettings: @escaping () -> Void = {},
                     openLoginItemsSettings: @escaping () -> Void = {}) {
             self.save = save
+            self.setWorkspace = setWorkspace
             self.openAccessibilitySettings = openAccessibilitySettings
             self.openLoginItemsSettings = openLoginItemsSettings
         }
@@ -80,9 +88,87 @@ public final class SettingsModel {
     public var face: Face?
     public var renaming: Renaming?
     public var showingPrograms = false
+    public var showingVirtualChoices = false
+    public var selectedVirtualMonitorID: String?
+    public var selectedVirtualPlateID: UUID?
+    public var selectedBenchedPlateID: UUID?
+    public var focusVirtualPlateName = false
     public var selectedProgramID: UUID?
     public var pendingConfirm: PendingConfirm?
     public var focusRequest: FocusTarget?
+    public var measurementUnit: MeasurementUnit = .percent
+
+    private struct LayoutState {
+        var workspaces: [Workspace]
+        var programs: [Program]
+        var lastWorkspace: String
+        var selectedWorkspaceID: UUID?
+        var selectedZoneID: UUID?
+        var selectedProgramID: UUID?
+    }
+    private var undoStates: [LayoutState] = []
+    private var redoStates: [LayoutState] = []
+    private var editingGeometry = false
+    private var recordedEdit = false
+    private var persistenceWork: DispatchWorkItem?
+
+    public var canUndoLayout: Bool { !undoStates.isEmpty }
+    public var canRedoLayout: Bool { !redoStates.isEmpty }
+
+    private func recordLayout(grouped: Bool = false) {
+        if !grouped { endGeometryEdit() }
+        guard !editingGeometry || !recordedEdit else { return }
+        undoStates.append(captureLayout())
+        if undoStates.count > 100 { undoStates.removeFirst() }
+        redoStates.removeAll()
+        recordedEdit = true
+    }
+
+    private func captureLayout() -> LayoutState {
+        LayoutState(workspaces: workspaces, programs: programs, lastWorkspace: lastWorkspace,
+                    selectedWorkspaceID: selectedWorkspaceID, selectedZoneID: selectedZoneID,
+                    selectedProgramID: selectedProgramID)
+    }
+
+    public func beginGeometryEdit() { editingGeometry = true; recordedEdit = false }
+    public func endGeometryEdit() { editingGeometry = false; recordedEdit = false }
+
+    private func clearLayoutHistory() {
+        undoStates.removeAll()
+        redoStates.removeAll()
+        endGeometryEdit()
+    }
+
+    private func restoreLayout(_ state: LayoutState) {
+        workspaces = state.workspaces
+        programs = state.programs
+        lastWorkspace = state.lastWorkspace
+        selectedWorkspaceID = state.selectedWorkspaceID
+        selectedZoneID = state.selectedZoneID
+        selectedProgramID = state.selectedProgramID
+        endGeometryEdit()
+        if workspaces == original.workspaces && programs == original.programs
+            && lastWorkspace == original.lastWorkspace && startAtLogin == original.startAtLogin
+            && shortcuts == original.shortcuts {
+            persistenceWork?.cancel()
+            dirty = false
+            saved = false
+        } else {
+            touch()
+        }
+    }
+
+    public func undoLayout() {
+        guard let state = undoStates.popLast() else { return }
+        redoStates.append(captureLayout())
+        restoreLayout(state)
+    }
+
+    public func redoLayout() {
+        guard let state = redoStates.popLast() else { return }
+        undoStates.append(captureLayout())
+        restoreLayout(state)
+    }
 
     public private(set) var dirty = false
     public private(set) var saved = false
@@ -121,7 +207,10 @@ public final class SettingsModel {
     // MARK: - Lookup
 
     public var desk: DeskArrangement {
-        DeskPlanner.arrange(snapshot, references: workspaces.flatMap { $0.zones.map(\.monitor) }, remembered: remembered)
+        let references = workspaces.flatMap { workspace in
+            workspace.zones.map(\.monitor) + workspace.virtualPlates.map(\.monitor)
+        }
+        return DeskPlanner.arrange(snapshot, references: references, remembered: remembered)
     }
 
     public var selectedWorkspace: Workspace? {
@@ -138,6 +227,10 @@ public final class SettingsModel {
 
     public func monitorKey(_ zone: Zone) -> String {
         DeskPlanner.key(for: zone.monitor, in: snapshot)
+    }
+
+    public func monitorKeyFor(_ monitor: MonitorRef) -> String {
+        DeskPlanner.key(for: monitor, in: snapshot)
     }
 
     public func number(of zone: Zone, in workspace: Workspace) -> Int {
@@ -177,7 +270,7 @@ public final class SettingsModel {
     }
 
     public func presetMatch(on key: String, in workspace: Workspace) -> LayoutPreset? {
-        let zones = workspace.zones.filter { monitorKey($0) == key }
+        let zones = workspace.zones.filter { monitorKey($0) == key && $0.plateID == selectedZone?.plateID }
         return Self.designerPresets.first { preset in
             preset.zones.count == zones.count && preset.zones.allSatisfy { fraction in
                 zones.contains {
@@ -191,7 +284,7 @@ public final class SettingsModel {
     // MARK: - Validation
 
     public func fault(of zone: Zone) -> ZoneFault? {
-        if zone.w <= 0 || zone.h <= 0 { return .empty }
+        if zone.w < 1 || zone.h < 1 { return .empty }
         if zone.x < 0 || zone.y < 0 { return .negative }
         if zone.x + zone.w > 100.05 { return .pastRight(zone.x + zone.w - 100) }
         if zone.y + zone.h > 100.05 { return .pastBottom(zone.y + zone.h - 100) }
@@ -213,7 +306,7 @@ public final class SettingsModel {
                 let number = number(of: zone, in: workspace)
                 let message: String
                 switch fault {
-                case .empty: message = "\(workspace.name) zone \(number) has no width or height"
+                case .empty: message = "\(workspace.name) zone \(number) must be at least 1% wide and high"
                 case .negative: message = "\(workspace.name) zone \(number) starts off the screen"
                 case .pastRight: message = "\(workspace.name) zone \(number) runs past the right edge"
                 case .pastBottom: message = "\(workspace.name) zone \(number) runs past the bottom edge"
@@ -234,6 +327,7 @@ public final class SettingsModel {
             focusRequest = .rename
         case let .zone(workspaceID, zoneID):
             showingPrograms = false
+            if selectedWorkspaceID != workspaceID { clearLayoutHistory() }
             selectedWorkspaceID = workspaceID
             selectedZoneID = zoneID
             face = .zone
@@ -255,18 +349,81 @@ public final class SettingsModel {
     private func touch() {
         dirty = true
         saved = false
+        persistenceWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.persistCurrentConfig()
+        }
+        persistenceWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+    }
+
+    private func persistableConfig() -> SlotterConfig {
+        var candidate = config
+        for workspaceIndex in candidate.workspaces.indices {
+            for zoneIndex in candidate.workspaces[workspaceIndex].zones.indices.reversed() {
+                let zone = candidate.workspaces[workspaceIndex].zones[zoneIndex]
+                guard fault(of: zone) != nil else { continue }
+                if let previous = original.workspaces.first(where: { $0.id == candidate.workspaces[workspaceIndex].id })?
+                    .zones.first(where: { $0.id == zone.id }) {
+                    var safe = zone
+                    if safe.x < 0 { safe.x = previous.x }
+                    if safe.y < 0 { safe.y = previous.y }
+                    if safe.w < 1 { safe.w = previous.w }
+                    if safe.h < 1 { safe.h = previous.h }
+                    if safe.x + safe.w > 100.05 {
+                        let resetX = safe.x
+                        safe.x = previous.x
+                        if fault(of: safe) != nil {
+                            safe.x = resetX
+                            safe.w = previous.w
+                        }
+                    }
+                    if safe.y + safe.h > 100.05 {
+                        let resetY = safe.y
+                        safe.y = previous.y
+                        if fault(of: safe) != nil {
+                            safe.y = resetY
+                            safe.h = previous.h
+                        }
+                    }
+                    candidate.workspaces[workspaceIndex].zones[zoneIndex] = fault(of: safe) == nil ? safe : previous
+                } else {
+                    candidate.workspaces[workspaceIndex].zones.remove(at: zoneIndex)
+                }
+            }
+        }
+        for index in candidate.programs.indices.reversed()
+        where Validate.programPath(candidate.programs[index].path) != nil {
+            if let previous = original.programs.first(where: { $0.id == candidate.programs[index].id }) {
+                candidate.programs[index].path = previous.path
+            } else {
+                candidate.programs.remove(at: index)
+            }
+        }
+        return candidate
+    }
+
+    @discardableResult
+    private func persistCurrentConfig() -> SlotterConfig? {
+        guard let stored = actions.save(persistableConfig()) else { return nil }
+        original = stored
+        dirty = !faults.isEmpty
+        saved = !dirty
+        return stored
     }
 
     public func save() {
-        guard dirty, faults.isEmpty else {
-            gotoFirstFault()
-            return
-        }
-        let stored = actions.save(config)
-        original = stored
+        guard dirty else { return }
+        persistenceWork?.cancel()
+        guard let stored = persistCurrentConfig() else { return }
         startAtLogin = stored.startAtLogin
-        dirty = false
-        saved = true
+        if !faults.isEmpty { gotoFirstFault() }
+    }
+
+    public func flushOnClose() {
+        if renaming != nil { commitRename() }
+        save()
     }
 
     public func toggleStartAtLogin() {
@@ -274,7 +431,24 @@ public final class SettingsModel {
         touch()
     }
 
+    public func setShortcut(_ action: SnapAction, combo: KeyCombo?) {
+        shortcuts[action.rawValue] = combo.map(\.display) ?? "none"
+        touch()
+    }
+
+    public func resetShortcut(_ action: SnapAction) {
+        shortcuts.removeValue(forKey: action.rawValue)
+        touch()
+    }
+
+    public func resetShortcuts() {
+        guard !shortcuts.isEmpty else { return }
+        shortcuts.removeAll()
+        touch()
+    }
+
     public func cancel() {
+        clearLayoutHistory()
         workspaces = original.workspaces
         programs = original.programs
         lastWorkspace = original.lastWorkspace
@@ -291,13 +465,17 @@ public final class SettingsModel {
     // MARK: - Workspaces
 
     public func selectWorkspace(_ id: UUID) {
+        clearLayoutHistory()
         selectedWorkspaceID = id
+        selectedVirtualPlateID = nil
         selectedZoneID = selectedWorkspace?.zones.first?.id
         if face != .settings { face = selectedZoneID == nil ? nil : .zone }
     }
 
     public func selectZone(_ id: UUID) {
+        endGeometryEdit()
         selectedZoneID = id
+        selectedVirtualPlateID = selectedWorkspace?.zones.first(where: { $0.id == id })?.plateID
         face = .zone
     }
 
@@ -307,6 +485,7 @@ public final class SettingsModel {
 
     /// One full zone on every connected monitor, then straight into rename.
     public func addWorkspace() {
+        clearLayoutHistory()
         var index = 1
         while workspaces.contains(where: { $0.name.caseInsensitiveCompare("Workspace \(index)") == .orderedSame }) {
             index += 1
@@ -339,6 +518,7 @@ public final class SettingsModel {
         guard name != old else { return }
         workspaces[index].name = name
         if lastWorkspace.caseInsensitiveCompare(old) == .orderedSame { lastWorkspace = name }
+        updateHistoryWorkspace(old, to: name)
         touch()
     }
 
@@ -347,12 +527,25 @@ public final class SettingsModel {
     }
 
     public func removeSelectedWorkspace() {
-        guard let index = selectedWorkspaceIndex else { return }
+        guard let workspace = selectedWorkspace else { return }
+        confirm(ConfirmRequest(heading: "Remove \(workspace.name)?",
+                               body: "Its plates and zones will be removed. You can undo this removal.",
+                               confirmTitle: "Remove", danger: true)) { [weak self] in
+            self?.removeWorkspace(workspace.id)
+        }
+    }
+
+    private func removeWorkspace(_ id: UUID) {
+        guard let index = workspaces.firstIndex(where: { $0.id == id }) else { return }
+        recordLayout()
         let removed = workspaces.remove(at: index)
         if renaming?.workspaceID == removed.id { renaming = nil }
         if lastWorkspace.caseInsensitiveCompare(removed.name) == .orderedSame { lastWorkspace = "" }
-        selectedWorkspaceID = nil
-        if let next = workspaces.first { selectWorkspace(next.id) } else { selectedZoneID = nil; face = face == .settings ? .settings : nil }
+        if selectedWorkspaceID == id {
+            selectedWorkspaceID = workspaces.first?.id
+            selectedZoneID = selectedWorkspace?.zones.first?.id
+            if selectedZoneID == nil, face != .settings { face = nil }
+        }
         touch()
     }
 
@@ -360,13 +553,15 @@ public final class SettingsModel {
 
     private func mutateWorkspace(_ body: (inout Workspace) -> Void) {
         guard let index = selectedWorkspaceIndex else { return }
+        recordLayout()
         body(&workspaces[index])
         touch()
     }
 
-    private func mutateZone(_ body: (inout Zone) -> Void) {
+    private func mutateZone(grouped: Bool = false, _ body: (inout Zone) -> Void) {
         guard let index = selectedWorkspaceIndex,
               let zoneIndex = workspaces[index].zones.firstIndex(where: { $0.id == selectedZoneID }) else { return }
+        recordLayout(grouped: grouped)
         body(&workspaces[index].zones[zoneIndex])
         touch()
     }
@@ -374,7 +569,8 @@ public final class SettingsModel {
     public func setValue(_ field: Field, _ value: Double) {
         guard value.isFinite else { return }
         let rounded = (value * 100).rounded() / 100
-        mutateZone { zone in
+        guard let zone = selectedZone, percentValue(field, for: zone) != rounded else { return }
+        mutateZone(grouped: true) { zone in
             switch field {
             case .x: zone.x = rounded
             case .y: zone.y = rounded
@@ -382,6 +578,54 @@ public final class SettingsModel {
             case .h: zone.h = rounded
             }
         }
+    }
+
+    private func percentValue(_ field: Field, for zone: Zone) -> Double {
+        switch field { case .x: zone.x; case .y: zone.y; case .w: zone.w; case .h: zone.h }
+    }
+
+    private var workAreaPixels: CGSize? {
+        guard let zone = selectedZone, let display = DisplayRegistry.resolve(zone.monitor, in: snapshot),
+              display.pointSize.width > 0, display.pointSize.height > 0 else { return nil }
+        let size = CGSize(width: display.workAreaAX.width * display.pixelSize.width / display.pointSize.width,
+                          height: display.workAreaAX.height * display.pixelSize.height / display.pointSize.height)
+        return size.width > 0 && size.height > 0 ? size : nil
+    }
+
+    public var canMeasurePixels: Bool { workAreaPixels != nil }
+    public var unitSymbol: String { measurementUnit == .pixels && canMeasurePixels ? "px" : "%" }
+
+    public func displayValue(_ field: Field, for zone: Zone) -> Double {
+        let value = percentValue(field, for: zone)
+        guard measurementUnit == .pixels, let size = workAreaPixels else { return value }
+        return value * (field == .x || field == .w ? size.width : size.height) / 100
+    }
+
+    public func setDisplayValue(_ field: Field, _ value: Double) {
+        guard measurementUnit == .pixels, let size = workAreaPixels else { setValue(field, value); return }
+        setValue(field, value * 100 / (field == .x || field == .w ? size.width : size.height))
+    }
+
+    public func applyGrid(columns: Int, rows: Int) {
+        guard let preset = PresetCatalog.grid(columns: columns, rows: rows) else { return }
+        applyPreset(preset)
+    }
+
+    public var freeSpace: ZoneFraction? {
+        guard let zone = selectedZone, let workspace = selectedWorkspace else { return nil }
+        return ZoneOps.largestFreeSpace(among: workspace.zones.filter { samePlate($0, zone) })
+    }
+
+    private func samePlate(_ candidate: Zone, _ selected: Zone) -> Bool {
+        monitorKey(candidate) == monitorKey(selected) && candidate.plateID == selected.plateID
+    }
+
+    public func fillFreeSpace() {
+        guard let zone = selectedZone, let gap = freeSpace else { return }
+        let added = Zone(monitor: zone.monitor, x: gap.x, y: gap.y, w: gap.w, h: gap.h, plateID: zone.plateID)
+        mutateWorkspace { $0.zones.append(added) }
+        selectedZoneID = added.id
+        face = .zone
     }
 
     public func fitSelectedZone() {
@@ -397,6 +641,7 @@ public final class SettingsModel {
 
     public func splitSelectedZone(vertical: Bool) {
         guard let zone = selectedZone else { return }
+        guard vertical ? zone.isSplittableHorizontally : zone.isSplittableVertically else { return }
         let halves = vertical ? ZoneOps.splitVertical(zone) : ZoneOps.splitHorizontal(zone)
         mutateWorkspace { workspace in
             guard let index = workspace.zones.firstIndex(where: { $0.id == zone.id }) else { return }
@@ -408,29 +653,27 @@ public final class SettingsModel {
 
     public func canDeleteSelectedZone() -> Bool {
         guard let zone = selectedZone, let workspace = selectedWorkspace else { return false }
-        let key = monitorKey(zone)
-        return workspace.zones.filter { monitorKey($0) == key }.count > 1
+        return workspace.zones.filter { samePlate($0, zone) }.count > 1
     }
 
     public func deleteSelectedZone() {
         guard canDeleteSelectedZone(), let zone = selectedZone else { return }
-        let key = monitorKey(zone)
         mutateWorkspace { $0.zones.removeAll { $0.id == zone.id } }
-        selectedZoneID = selectedWorkspace?.zones.first { monitorKey($0) == key }?.id
+        selectedZoneID = selectedWorkspace?.zones.first { samePlate($0, zone) }?.id
     }
 
     /// Replaces every zone on the selected zone's monitor, carrying the apps across in reading order.
     public func applyPreset(_ preset: LayoutPreset) {
         guard let zone = selectedZone else { return }
-        let key = monitorKey(zone)
         var made: [Zone] = []
         mutateWorkspace { workspace in
-            let old = workspace.zones.filter { monitorKey($0) == key }
+            let old = workspace.zones.filter { samePlate($0, zone) }
                 .sorted { ($0.y, $0.x) < ($1.y, $1.x) }
-            let at = workspace.zones.firstIndex { monitorKey($0) == key } ?? workspace.zones.count
+            let at = workspace.zones.firstIndex { samePlate($0, zone) } ?? workspace.zones.count
             made = ZoneOps.zones(from: preset, monitor: zone.monitor)
+            for index in made.indices { made[index].plateID = zone.plateID }
             for index in made.indices where index < old.count { made[index].program = old[index].program }
-            workspace.zones.removeAll { monitorKey($0) == key }
+            workspace.zones.removeAll { samePlate($0, zone) }
             workspace.zones.insert(contentsOf: made, at: min(at, workspace.zones.count))
         }
         selectedZoneID = made.first?.id
@@ -438,21 +681,23 @@ public final class SettingsModel {
 
     public func resetSelectedMonitor() {
         guard let zone = selectedZone else { return }
-        let key = monitorKey(zone)
-        let keep = selectedWorkspace?.zones.first { monitorKey($0) == key && $0.program != nil }?.program
-        applyPreset(PresetCatalog.all[0])
-        mutateZone { $0.program = keep }
+        let keep = selectedWorkspace?.zones.first { samePlate($0, zone) && $0.program != nil }?.program
+        let full = Zone(monitor: zone.monitor, x: 0, y: 0, w: 100, h: 100, program: keep, plateID: zone.plateID)
+        mutateWorkspace { workspace in
+            workspace.zones.removeAll { samePlate($0, zone) }
+            workspace.zones.append(full)
+        }
+        selectedZoneID = full.id
     }
 
     public func canStopUsingSelectedMonitor() -> Bool {
         guard let workspace = selectedWorkspace else { return false }
-        return Set(workspace.zones.map(monitorKey)).count > 1
+        return Set(workspace.zones.map { "\(monitorKey($0)):\($0.plateID?.uuidString ?? "physical")" }).count > 1
     }
 
     public func stopUsingSelectedMonitor() {
         guard canStopUsingSelectedMonitor(), let zone = selectedZone else { return }
-        let key = monitorKey(zone)
-        mutateWorkspace { $0.zones.removeAll { monitorKey($0) == key } }
+        mutateWorkspace { $0.zones.removeAll { samePlate($0, zone) } }
         selectedZoneID = selectedWorkspace?.zones.first?.id
     }
 
@@ -461,6 +706,83 @@ public final class SettingsModel {
         mutateWorkspace { $0.zones.append(zone) }
         selectedZoneID = zone.id
         face = .zone
+    }
+
+    public func addVirtualPlate(on monitor: DeskMonitor, desktop: ManagedSpace) {
+        guard let workspaceIndex = selectedWorkspaceIndex else { return }
+        let reference = monitor.reference
+        let plate = VirtualPlate(name: desktop.label, monitor: reference, desktopID: desktop.uuid)
+        let copies = workspaces[workspaceIndex].zones.filter {
+            $0.plateID == nil && monitorKey($0) == monitor.id
+        }.map { source -> Zone in
+            var copy = source
+            copy.id = UUID()
+            copy.plateID = plate.id
+            return copy
+        }
+        recordLayout()
+        workspaces[workspaceIndex].virtualPlates.append(plate)
+        workspaces[workspaceIndex].zones.append(contentsOf: copies)
+        selectedVirtualPlateID = plate.id
+        selectedZoneID = copies.first?.id
+        selectedVirtualMonitorID = nil
+        showingVirtualChoices = false
+        touch()
+    }
+
+    public func benchVirtualPlate(_ id: UUID) {
+        guard let workspaceIndex = selectedWorkspaceIndex,
+              let index = workspaces[workspaceIndex].virtualPlates.firstIndex(where: { $0.id == id }) else { return }
+        recordLayout()
+        workspaces[workspaceIndex].virtualPlates[index].desktopID = nil
+        if selectedVirtualPlateID == id { selectedVirtualPlateID = nil }
+        touch()
+    }
+
+    public func renameVirtualPlate(_ id: UUID, to raw: String) {
+        guard let workspaceIndex = selectedWorkspaceIndex,
+              let index = workspaces[workspaceIndex].virtualPlates.firstIndex(where: { $0.id == id }) else { return }
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, workspaces[workspaceIndex].virtualPlates[index].name != name else { return }
+        recordLayout()
+        workspaces[workspaceIndex].virtualPlates[index].name = name
+        touch()
+    }
+
+    public func confirmDeleteBenchedPlate(_ id: UUID) {
+        guard let plate = selectedWorkspace?.virtualPlates.first(where: { $0.id == id }), plate.desktopID == nil else { return }
+        confirm(ConfirmRequest(heading: "Delete \(plate.name)?",
+                               body: "This removes the saved plate and its zones from this workspace.",
+                               confirmTitle: "Delete plate", danger: true)) { [weak self] in
+            guard let self, let workspaceIndex = self.selectedWorkspaceIndex else { return }
+            self.recordLayout()
+            self.workspaces[workspaceIndex].virtualPlates.removeAll { $0.id == id }
+            self.workspaces[workspaceIndex].zones.removeAll { $0.plateID == id }
+            if self.selectedVirtualPlateID == id { self.selectedVirtualPlateID = nil }
+            if self.selectedBenchedPlateID == id { self.selectedBenchedPlateID = nil }
+            self.touch()
+        }
+    }
+
+    public func selectVirtualPlate(_ id: UUID?) {
+        selectedVirtualPlateID = id
+        if let id, let workspace = selectedWorkspace {
+            selectedZoneID = workspace.zones.first(where: { $0.plateID == id })?.id
+            face = selectedZoneID == nil ? .settings : .zone
+        }
+    }
+
+    public func pinVirtualPlate(_ id: UUID, to desktop: ManagedSpace) {
+        guard let workspaceIndex = selectedWorkspaceIndex,
+              let index = workspaces[workspaceIndex].virtualPlates.firstIndex(where: { $0.id == id }) else { return }
+        let monitorID = DeskPlanner.key(for: workspaces[workspaceIndex].virtualPlates[index].monitor, in: snapshot)
+        guard !workspaces[workspaceIndex].virtualPlates.contains(where: {
+            $0.id != id && $0.desktopID == desktop.uuid
+                && DeskPlanner.key(for: $0.monitor, in: snapshot) == monitorID
+        }) else { return }
+        recordLayout()
+        workspaces[workspaceIndex].virtualPlates[index].desktopID = desktop.uuid
+        touch()
     }
 
     public func moveZoneSelection(by delta: Int) {
@@ -497,6 +819,7 @@ public final class SettingsModel {
 
     public func removeSelectedProgram() {
         guard let index = programs.firstIndex(where: { $0.id == selectedProgramID }) else { return }
+        recordLayout()
         let removed = programs.remove(at: index)
         for w in workspaces.indices {
             for z in workspaces[w].zones.indices
@@ -518,6 +841,7 @@ public final class SettingsModel {
         let old = programs[index].name
         guard name != old else { return nil }
         programs[index].name = name
+        updateHistoryProgram(programs[index], replacing: old)
         for w in workspaces.indices {
             for z in workspaces[w].zones.indices
             where workspaces[w].zones[z].program?.caseInsensitiveCompare(old) == .orderedSame {
@@ -530,8 +854,38 @@ public final class SettingsModel {
 
     public func updateProgram(_ id: UUID, _ body: (inout Program) -> Void) {
         guard let index = programs.firstIndex(where: { $0.id == id }) else { return }
+        let oldName = programs[index].name
         body(&programs[index])
+        updateHistoryProgram(programs[index], replacing: oldName == programs[index].name ? nil : oldName)
         touch()
+    }
+
+    private func updateHistoryProgram(_ program: Program, replacing oldName: String?) {
+        func update(_ state: inout LayoutState) {
+            for workspace in state.workspaces.indices {
+                for zone in state.workspaces[workspace].zones.indices
+                where oldName.map({ state.workspaces[workspace].zones[zone].program?.caseInsensitiveCompare($0) == .orderedSame }) == true {
+                    state.workspaces[workspace].zones[zone].program = program.name
+                }
+            }
+            if let index = state.programs.firstIndex(where: { $0.id == program.id }) {
+                state.programs[index] = program
+            }
+        }
+        for index in undoStates.indices { update(&undoStates[index]) }
+        for index in redoStates.indices { update(&redoStates[index]) }
+    }
+
+    private func updateHistoryWorkspace(_ name: String, to newName: String) {
+        func update(_ state: inout LayoutState) {
+            for index in state.workspaces.indices
+            where state.workspaces[index].name.caseInsensitiveCompare(name) == .orderedSame {
+                state.workspaces[index].name = newName
+            }
+            if state.lastWorkspace.caseInsensitiveCompare(name) == .orderedSame { state.lastWorkspace = newName }
+        }
+        for index in undoStates.indices { update(&undoStates[index]) }
+        for index in redoStates.indices { update(&redoStates[index]) }
     }
 
     public func confirm(_ request: ConfirmRequest, action: @escaping () -> Void) {

@@ -9,7 +9,24 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var registrations: [ShortcutCenter.Registration] = []
     private var config = SlotterConfig()
     private var activeWorkspace: String?
+    private var manualSelectionCleared = false
+    private var currentSpaceSnapshot = SpaceSnapshot(available: false)
+    private var resolvedWorkspacesByDisplay: [String: Workspace] = [:]
+    private var loggedSpaceUUIDs: [String: String]?
+    private var spaceRefreshGeneration = 0
     private let openSettingsAtLaunch: Bool
+
+    @objc func undoLayout(_ sender: Any?) {
+        if let text = NSApp.keyWindow?.firstResponder as? NSTextView {
+            text.undoManager?.undo()
+        } else { SettingsWindowController.shared.undoLayout() }
+    }
+
+    @objc func redoLayout(_ sender: Any?) {
+        if let text = NSApp.keyWindow?.firstResponder as? NSTextView {
+            text.undoManager?.redo()
+        } else { SettingsWindowController.shared.redoLayout() }
+    }
 
     init(openSettings: Bool = false) {
         openSettingsAtLaunch = openSettings
@@ -26,6 +43,8 @@ final class AppController: NSObject, NSApplicationDelegate {
 
         ConfigStore.shared.writeDefaultIfMissing()
         config = ConfigStore.shared.load()
+        activeWorkspace = config.workspace(named: config.lastWorkspace)?.name
+        settleSpaceResolution()
         ConfigStore.shared.onExternalChange = { [weak self] in self?.reloadConfig() }
         ConfigStore.shared.startWatching()
 
@@ -50,6 +69,11 @@ final class AppController: NSObject, NSApplicationDelegate {
             ToastPresenter.shared.show(ToastContent(title: title, body: body, success: success))
         }
         ShortcutCenter.shared.onAction = { action in SnapEngine.perform(action) }
+        ShortcutCenter.shared.onRegistrationsChanged = { [weak self] results in
+            guard let self else { return }
+            self.registrations = results
+            self.refreshMenuState()
+        }
 
         let drag = DragSnapService(callbacks: .init(
             present: { targets, flipY in OverlayCoordinator.shared.present(zones: targets, flipY: flipY) },
@@ -59,6 +83,11 @@ final class AppController: NSObject, NSApplicationDelegate {
         drag.workspaceProvider = { [weak self] in
             guard let self, let active = self.activeWorkspace else { return nil }
             return self.config.workspace(named: active)
+        }
+        drag.workspacesByDisplayProvider = { [weak self] in
+            guard let self else { return [:] }
+            self.refreshSpaceResolution()
+            return self.resolvedWorkspacesByDisplay
         }
         dragService = drag
 
@@ -74,8 +103,12 @@ final class AppController: NSObject, NSApplicationDelegate {
             name: NSWorkspace.didTerminateApplicationNotification, object: nil)
 
         NSWorkspace.shared.notificationCenter.addObserver(
-            self, selector: #selector(cancelDrag),
+            self, selector: #selector(spaceDidChange),
             name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(spaceDidChange),
+            name: NSWorkspace.didWakeNotification, object: nil)
 
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(cancelDrag),
@@ -103,6 +136,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        SettingsWindowController.shared.flushBeforeTermination()
         dragService?.stop()
         ShortcutCenter.shared.unregisterAll()
         ConfigStore.shared.stopWatching()
@@ -113,15 +147,22 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     @objc private func screenParametersChanged() {
         let snapshot = DisplayRegistry.refresh()
+        settleSpaceResolution()
         FrameHistory.shared.clampToDisplays(snapshot)
         dragService?.cancel()
         SettingsWindowController.shared.displaysChanged()
+        refreshMenuState()
         Log.write("display arrangement changed")
         logDisplays()
     }
 
     @objc private func cancelDrag() {
         dragService?.cancel()
+    }
+
+    @objc private func spaceDidChange() {
+        dragService?.cancel()
+        settleSpaceResolution()
     }
 
     @objc private func applicationTerminated(_ notification: Notification) {
@@ -145,19 +186,18 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func applyShortcuts() {
-        guard AX.isTrusted else {
-            ShortcutCenter.shared.unregisterAll()
-            dragService?.stop()
-            registrations = []
-            return
-        }
         registrations = ShortcutCenter.shared.register(MagnetLayouts.table(overrides: config.shortcuts))
-        dragService?.start()
+        if AX.isTrusted { dragService?.start() }
+        else { dragService?.stop() }
     }
 
     private func reloadConfig() {
         config = ConfigStore.shared.load()
+        if let activeWorkspace, config.workspace(named: activeWorkspace) == nil {
+            self.activeWorkspace = config.workspace(named: config.lastWorkspace)?.name
+        }
         applyShortcuts()
+        refreshSpaceResolution()
         refreshMenuState()
         Log.write("config reloaded: \(config.workspaces.count) workspaces, \(config.programs.count) programs")
     }
@@ -173,12 +213,63 @@ final class AppController: NSObject, NSApplicationDelegate {
         SettingsModel.Status(accessibilityTrusted: AX.isTrusted,
                              shortcutCount: registrations.count,
                              shortcutFailures: registrations.filter { !$0.succeeded }.count,
-                             loginNeedsApproval: LoginItem.state == .requiresApproval)
+                             loginNeedsApproval: LoginItem.state == .requiresApproval,
+                             unavailableShortcuts: registrations.filter { !$0.succeeded }.map { $0.action.rawValue },
+                             spaceSnapshot: currentSpaceSnapshot)
+    }
+
+    private func refreshSpaceResolution() {
+        let manual = config.workspace(named: activeWorkspace ?? config.lastWorkspace)
+        let result = VirtualPlateResolver().resolve(manualWorkspace: manual, workspaces: config.workspaces)
+        currentSpaceSnapshot = result.snapshot
+        resolvedWorkspacesByDisplay = result.workspacesByDisplay
+    }
+
+    private func settleSpaceResolution() {
+        spaceRefreshGeneration += 1
+        let generation = spaceRefreshGeneration
+        refreshSpaceResolution()
+        logDesktopChanges(in: currentSpaceSnapshot)
+        for delay in [0.2, 0.6] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.spaceRefreshGeneration == generation else { return }
+                self.refreshSpaceResolution()
+                self.logDesktopChanges(in: self.currentSpaceSnapshot)
+                self.refreshMenuState()
+            }
+        }
+        refreshMenuState()
+    }
+
+    private func logDesktopChanges(in current: SpaceSnapshot) {
+        guard current.available else { return }
+        let previous = loggedSpaceUUIDs
+        loggedSpaceUUIDs = Dictionary(uniqueKeysWithValues: current.displays.compactMap { display in
+            display.currentSpace.map { (display.displayUUID, $0.uuid) }
+        })
+        guard let previous else { return }
+        let manual = manualSelectionCleared ? nil
+            : config.workspace(named: activeWorkspace ?? config.lastWorkspace)
+        for display in current.displays {
+            guard let space = display.currentSpace,
+                  let old = previous[display.displayUUID], old != space.uuid else { continue }
+            let plate = config.workspaces.lazy.compactMap { workspace in
+                workspace.virtualPlates.first(where: { $0.desktopID == space.uuid && $0.monitor.uuid == display.displayUUID })
+                    .map { (workspace, $0) }
+            }.first
+            if let (workspace, plate) = plate {
+                Log.write("desktop changed: \(space.label) on \(display.displayName) uuid=\(space.uuid); virtual plate \(plate.name) in \(workspace.name)")
+            } else {
+                Log.write("desktop changed: \(space.label) on \(display.displayName) uuid=\(space.uuid); physical plate -> manual \(manual?.name ?? "none")")
+            }
+        }
     }
 
     private func clearActiveZones() {
         guard let name = activeWorkspace else { return }
         activeWorkspace = nil
+        manualSelectionCleared = true
+        settleSpaceResolution()
         refreshMenuState()
         toast("\(name) zones are off", "Dragging now snaps to screen edges and corners only.", success: true)
     }
@@ -209,7 +300,9 @@ final class AppController: NSObject, NSApplicationDelegate {
 
         config.lastWorkspace = workspace.name
         activeWorkspace = workspace.name
+        manualSelectionCleared = false
         ConfigStore.shared.save(config)
+        refreshSpaceResolution()
         refreshMenuState()
 
         let assigned = workspace.zones.filter { !($0.program ?? "").isEmpty }.count
@@ -280,7 +373,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     private func openSettings(openPrograms: Bool = false) {
         NSApp.activate()
         let actions = SettingsModel.Actions(
-            save: { [weak self] updated in self?.store(updated) ?? updated },
+            save: { [weak self] updated in self?.store(updated) },
+            setWorkspace: { [weak self] workspace in self?.launch(workspace) },
             openAccessibilitySettings: {
                 AX.requestTrust()
                 AX.openAccessibilitySettings()
@@ -292,7 +386,7 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     /// Persists what the designer saved and returns it as stored, since macOS may refuse the
     /// start-at-login change.
-    private func store(_ updated: SlotterConfig) -> SlotterConfig {
+    private func store(_ updated: SlotterConfig) -> SlotterConfig? {
         var saved = updated
         if updated.startAtLogin != LoginItem.state.isOn {
             if !LoginItem.set(updated.startAtLogin) {
@@ -302,13 +396,31 @@ final class AppController: NSObject, NSApplicationDelegate {
             }
             saved.startAtLogin = LoginItem.state.isOn
         }
+        guard ConfigStore.shared.save(saved) else {
+            toast("Settings could not be written", "Slotter could not update profiles.ini.", success: false)
+            return nil
+        }
         if let active = activeWorkspace, saved.workspace(named: active) == nil {
-            activeWorkspace = nil
+            activeWorkspace = saved.workspace(named: saved.lastWorkspace)?.name
         }
         config = saved
-        ConfigStore.shared.save(saved)
+        settleSpaceResolution()
         applyShortcuts()
         refreshMenuState()
         return saved
+    }
+}
+
+extension AppController: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(undoLayout(_:)) {
+            if let text = NSApp.keyWindow?.firstResponder as? NSTextView { return text.undoManager?.canUndo ?? false }
+            return SettingsWindowController.shared.canUndoLayout
+        }
+        if menuItem.action == #selector(redoLayout(_:)) {
+            if let text = NSApp.keyWindow?.firstResponder as? NSTextView { return text.undoManager?.canRedo ?? false }
+            return SettingsWindowController.shared.canRedoLayout
+        }
+        return true
     }
 }

@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Carbon.HIToolbox
 @testable import SlotterKit
 
 private let sample = """
@@ -102,7 +103,220 @@ Args1=
 @Test func workspaceNameValidationRejectsReservedAndDuplicates() {
     let workspaces = [Workspace(name: "Coding")]
     #expect(Validate.workspaceName("Programs", in: workspaces) != nil)
+    #expect(Validate.workspaceName("Shortcuts", in: workspaces) != nil)
+    #expect(Validate.workspaceName("SpaceBindings", in: workspaces) != nil)
     #expect(Validate.workspaceName("coding", in: workspaces) != nil)
     #expect(Validate.workspaceName("a,b", in: workspaces) != nil)
     #expect(Validate.workspaceName("Writing", in: workspaces) == nil)
+}
+
+@Test @MainActor func shortcutConfigDropsLegacyBindingsAndKeepsExplicitUnboundValues() {
+    let workspaceID = UUID()
+    let workspace = Workspace(name: "Coding", id: workspaceID)
+    let config = SlotterConfig(workspaces: [workspace], shortcuts: [
+        "leftHalf": "⌃⌥A",
+        "rightHalf": "none",
+    ])
+
+    let text = ConfigStore().serializedConfig(config, preserving: "[SpaceBindings]\nFollowDesktop=1\nBinding1=screen-a|space-a|\(workspaceID.uuidString)\n")
+    let loaded = ConfigStore.parse(IniDocument(text: text))
+
+    #expect(loaded.shortcuts["leftHalf"] == "⌃⌥A")
+    #expect(loaded.shortcuts["rightHalf"] == "none")
+    #expect(MagnetLayouts.table(overrides: loaded.shortcuts)[.rightHalf] == nil)
+    #expect(loaded.workspaces.first?.id == workspaceID)
+    #expect(!text.contains("[SpaceBindings]"))
+}
+
+@Test @MainActor func virtualPlatesAndZonePlateIDsRoundTripIncludingBenchedPlate() {
+    let monitor = MonitorRef(ordinal: 2, uuid: "screen-a", legacyKey: "1728x1117", duplicateIndex: 1)
+    let pinned = VirtualPlate(name: "Writing", monitor: monitor, desktopID: "space-a")
+    let benched = VirtualPlate(name: "Research", monitor: monitor, desktopID: nil)
+    let workspace = Workspace(name: "Coding", zones: [
+        Zone(monitor: monitor, x: 0, y: 0, w: 50, h: 100, plateID: pinned.id),
+    ], virtualPlates: [pinned, benched])
+
+    let text = ConfigStore().serializedConfig(SlotterConfig(workspaces: [workspace]))
+    let loaded = ConfigStore.parse(IniDocument(text: text)).workspaces[0]
+
+    #expect(loaded.virtualPlates == [pinned, benched])
+    #expect(loaded.zones[0].plateID == pinned.id)
+}
+
+@Test func keyComboNamesRoundTripCommonKeys() {
+    let names = ["A", "Z", "0", "9", "F1", "F20", "←", "→", "↑", "↓", "↩", "⌫", "⌦",
+                 "Space", "Tab", "`", "-", "=", "[", "]", "\\", ";", "'", ",", ".", "/"]
+    for name in names {
+        let combo = KeyCombo.parse("⌃⌥\(name)")
+        #expect(combo != nil)
+        #expect(combo.map { "⌃⌥\(KeyCombo.name(for: $0.keyCode))" } == "⌃⌥\(name)")
+    }
+    #expect(KeyCombo.parse("A") == nil)
+}
+
+@Test func keyComboNamesRoundTripUnlistedKeyCodes() {
+    let keypadOne = KeyCombo(keyCode: 83, modifiers: UInt32(controlKey))
+    #expect(keypadOne.display == "⌃key 83")
+    #expect(KeyCombo.parse(keypadOne.display) == keypadOne)
+}
+
+@Test @MainActor func savedNumericShortcutReloadsWithItsOriginalKeyCode() {
+    let workspace = Workspace(name: "Coding")
+    let config = SlotterConfig(workspaces: [workspace], shortcuts: ["leftHalf": "⌃key 83"])
+
+    let saved = ConfigStore().serializedConfig(config)
+    let loaded = ConfigStore.parse(IniDocument(text: saved))
+
+    #expect(MagnetLayouts.table(overrides: loaded.shortcuts)[.leftHalf] == KeyCombo(keyCode: 83,
+                                                                                   modifiers: UInt32(controlKey)))
+}
+
+@Test func parsesManagedSpaceIDsFromCGSSpaceDictionaries() {
+    let item: [String: Any] = [
+        "Current Space": ["ManagedSpaceID": 10, "id64": 20],
+        "Spaces": [
+            ["uuid": "space-a", "ManagedSpaceID": 10, "type": 0],
+            ["uuid": "space-b", "id64": 20, "type": 0],
+        ],
+    ]
+
+    let display = SpaceRegistry.parseDisplaySpaces(item, displayUUID: "screen-a", displayName: "LG CX",
+                                                   activeSpaceID: 10)
+
+    #expect(display?.spaces.map(\.id) == [10, 20])
+    #expect(display?.currentSpaceUUID == "space-a")
+}
+
+@Test func readsLegacyID64ForCurrentSpaceWhenManagedSpaceIDIsAbsent() {
+    let item: [String: Any] = [
+        "Current Space": ["id64": 20],
+        "Spaces": [
+            ["uuid": "space-a", "ManagedSpaceID": 10, "type": 0],
+            ["uuid": "space-b", "id64": 20, "type": 0],
+        ],
+    ]
+
+    let display = SpaceRegistry.parseDisplaySpaces(item, displayUUID: "screen-a", displayName: "LG CX",
+                                                   activeSpaceID: 10)
+
+    #expect(display?.currentSpaceUUID == "space-b")
+}
+
+@Test func rejectsCGSSpaceDictionariesWithoutUsableSpaces() {
+    let item: [String: Any] = [
+        "Current Space": ["ManagedSpaceID": 20],
+        "Spaces": [["uuid": "missing-id", "type": 0]],
+    ]
+
+    #expect(SpaceRegistry.parseDisplaySpaces(item, displayUUID: "screen-a", displayName: "LG CX",
+                                             activeSpaceID: 20) == nil)
+}
+
+@Test func shortcutConflictDetectionExcludesTheEditedAction() {
+    let combo = KeyCombo.parse("⌃⌥A")!
+    let overrides = ["leftHalf": "⌃⌥A", "rightHalf": "⌃⌥A"]
+    #expect(ShortcutRules.conflict(for: combo, excluding: .rightHalf, overrides: overrides) == .leftHalf)
+    #expect(ShortcutRules.conflict(for: combo, excluding: .leftHalf, overrides: overrides) == .rightHalf)
+}
+
+private struct FakeSpaceRegistry: SpaceRegistryProviding {
+    let value: SpaceSnapshot
+    func snapshot() -> SpaceSnapshot { value }
+}
+
+@Test func virtualPlateResolutionFallsBackToManualWorkspacePerDisplay() {
+    let monitor = MonitorRef(ordinal: 1, uuid: "screen-a")
+    let physical = Zone(monitor: monitor, x: 0, y: 0, w: 50, h: 100)
+    let virtualPlate = VirtualPlate(name: "Saved", monitor: monitor, desktopID: "space-old")
+    let virtual = Zone(monitor: monitor, x: 50, y: 0, w: 50, h: 100, plateID: virtualPlate.id)
+    let first = Workspace(name: "Manual", zones: [physical, virtual], virtualPlates: [virtualPlate])
+    let displayA = ManagedDisplaySpaces(displayUUID: "screen-a", displayName: "LG CX",
+                                       spaces: [ManagedSpace(uuid: "space-a", id: 10, type: 0,
+                                                             ordinal: 2, label: "Desktop 2")],
+                                       currentSpaceUUID: "space-a")
+    let displayB = ManagedDisplaySpaces(displayUUID: "screen-b", displayName: "Studio Display",
+                                       spaces: [ManagedSpace(uuid: "space-b", id: 20, type: 0,
+                                                             ordinal: 1, label: "Desktop 1")],
+                                       currentSpaceUUID: "space-b")
+    let registry = FakeSpaceRegistry(value: SpaceSnapshot(available: true, displays: [displayA, displayB]))
+    let result = VirtualPlateResolver(registry: registry).resolve(manualWorkspace: first, workspaces: [first])
+
+    #expect(result.snapshot.available)
+    #expect(result.workspacesByDisplay["screen-a"]?.id == first.id)
+    #expect(result.workspacesByDisplay["screen-b"]?.id == first.id)
+    #expect(result.workspacesByDisplay["screen-a"]?.zones == [physical])
+}
+
+@Test func virtualPlateResolutionSelectsPinnedWorkspaceOnMatchingDesktop() {
+    let manual = Workspace(name: "Manual")
+    let displayA = ManagedDisplaySpaces(displayUUID: "screen-a", displayName: "LG CX",
+                                       spaces: [ManagedSpace(uuid: "space-a", id: 10, type: 0,
+                                                             ordinal: 1, label: "Desktop 1")],
+                                       currentSpaceUUID: "space-a")
+    let displayB = ManagedDisplaySpaces(displayUUID: "screen-b", displayName: "Studio Display",
+                                       spaces: [ManagedSpace(uuid: "space-b", id: 20, type: 0,
+                                                             ordinal: 3, label: "Desktop 3")],
+                                       currentSpaceUUID: "space-b")
+    let registry = FakeSpaceRegistry(value: SpaceSnapshot(available: true, displays: [displayA, displayB]))
+    let firstPlate = VirtualPlate(name: "Desktop 1", monitor: MonitorRef(ordinal: 1, uuid: "screen-a"), desktopID: "space-a")
+    let first = Workspace(name: "Writing", zones: [Zone(monitor: firstPlate.monitor, x: 0, y: 0, w: 50, h: 100, plateID: firstPlate.id)], virtualPlates: [firstPlate])
+    let physical = Zone(monitor: firstPlate.monitor, x: 0, y: 0, w: 100, h: 100)
+    var workspaceWithBothLayouts = first
+    workspaceWithBothLayouts.zones = [physical] + first.zones
+    let second = Workspace(name: "Design")
+    let result = VirtualPlateResolver(registry: registry).resolve(manualWorkspace: workspaceWithBothLayouts,
+                                                                 workspaces: [manual, workspaceWithBothLayouts, second])
+
+    #expect(result.workspacesByDisplay["screen-a"]?.id == first.id)
+    #expect(result.workspacesByDisplay["screen-a"]?.zones == first.zones)
+    #expect(result.workspacesByDisplay["screen-b"]?.id == workspaceWithBothLayouts.id)
+}
+
+@Test func virtualPlateResolutionOnlyUsesTheActiveWorkspace() {
+    let monitor = MonitorRef(ordinal: 1, uuid: "screen-a")
+    let manual = Workspace(name: "Active", zones: [Zone(monitor: monitor, x: 0, y: 0, w: 100, h: 100)])
+    let otherPlate = VirtualPlate(name: "Other workspace", monitor: monitor, desktopID: "space-a")
+    let other = Workspace(name: "Other", zones: [
+        Zone(monitor: monitor, x: 0, y: 0, w: 50, h: 100, plateID: otherPlate.id)
+    ], virtualPlates: [otherPlate])
+    let display = ManagedDisplaySpaces(displayUUID: "screen-a", displayName: "LG CX",
+                                       spaces: [ManagedSpace(uuid: "space-a", id: 10, type: 0,
+                                                             ordinal: 1, label: "Desktop 1")],
+                                       currentSpaceUUID: "space-a")
+    let registry = FakeSpaceRegistry(value: SpaceSnapshot(available: true, displays: [display]))
+    let result = VirtualPlateResolver(registry: registry).resolve(manualWorkspace: manual, workspaces: [other, manual])
+
+    #expect(result.workspacesByDisplay["screen-a"] == manual)
+}
+
+@Test func unavailableSpaceDetectionFallsBackToPhysicalZonesOnly() {
+    let monitor = MonitorRef(ordinal: 1, uuid: "screen-a")
+    let physical = Zone(monitor: monitor, x: 0, y: 0, w: 100, h: 100)
+    let plate = VirtualPlate(name: "Saved", monitor: monitor, desktopID: "space-a")
+    let virtual = Zone(monitor: monitor, x: 0, y: 0, w: 50, h: 100, plateID: plate.id)
+    let manual = Workspace(name: "Manual", zones: [physical, virtual], virtualPlates: [plate])
+    let display = ManagedDisplaySpaces(displayUUID: "screen-a", displayName: "LG CX",
+                                       spaces: [ManagedSpace(uuid: "space-a", id: 10, type: 0,
+                                                             ordinal: 1, label: "Desktop 1")],
+                                       currentSpaceUUID: "space-a")
+    let registry = FakeSpaceRegistry(value: SpaceSnapshot(available: false, displays: [display]))
+    let result = VirtualPlateResolver(registry: registry).resolve(manualWorkspace: manual, workspaces: [manual])
+
+    #expect(result.workspacesByDisplay["screen-a"]?.zones == [physical])
+}
+
+@Test func fullscreenSpaceFallsBackToPhysicalWorkspace() {
+    let monitor = MonitorRef(ordinal: 1, uuid: "screen-a")
+    let physical = Zone(monitor: monitor, x: 0, y: 0, w: 100, h: 100)
+    let plate = VirtualPlate(name: "Saved", monitor: monitor, desktopID: "full")
+    let virtual = Zone(monitor: monitor, x: 0, y: 0, w: 50, h: 100, plateID: plate.id)
+    let manual = Workspace(name: "Manual", zones: [physical, virtual], virtualPlates: [plate])
+    let previous = Workspace(name: "Bound")
+    let display = ManagedDisplaySpaces(displayUUID: "screen-a", displayName: "LG CX",
+                                      spaces: [ManagedSpace(uuid: "full", id: 45, type: 4,
+                                                            ordinal: nil, label: "Fullscreen")],
+                                      currentSpaceUUID: "full")
+    let registry = FakeSpaceRegistry(value: SpaceSnapshot(available: true, displays: [display]))
+    let result = VirtualPlateResolver(registry: registry).resolve(manualWorkspace: manual, workspaces: [previous, manual])
+    #expect(result.workspacesByDisplay["screen-a"]?.zones == [physical])
 }

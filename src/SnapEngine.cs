@@ -110,6 +110,9 @@ namespace Slotter
         {
             timeout.Stop();
             track.Stop();
+            retry.Stop();
+            retryHwnd = IntPtr.Zero;
+            retryAttempts = 0;
             foreach (SnapOverlay overlay in overlays)
             {
                 try { overlay.Close(); }

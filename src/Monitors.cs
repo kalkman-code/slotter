@@ -13,6 +13,7 @@ namespace Slotter
         public bool Online;
         public System.Drawing.Rectangle Bounds;
         public int PixelW, PixelH;
+        public int WorkW, WorkH;
         public double WidthIn, HeightIn; // physical image size; 0 when the display does not say
 
         public bool HasSize { get { return WidthIn > 0 && HeightIn > 0; } }
@@ -52,15 +53,16 @@ namespace Slotter
         public static void Remember() { if (Override == null) Connected(); }
 
         // [Monitors] in profiles.ini, one line per resolution key, hand-editable:
-        //   3440x1440=Ultrawide|31.5|13.39|3840|180
-        // name | width and height in inches (0 when unknown) | left and top in desktop pixels.
+        //   3440x1440=Ultrawide|31.5|13.39|3840|180|3440|1400
+        // name | width and height in inches (0 when unknown) | desktop left/top | working width/height.
         const string Section = "Monitors";
 
         static void Record(MonitorInfo m)
         {
             if (SystemInformation.TerminalServerSession) return;
             string line = string.Join("|", new[] { m.Name, Num(m.WidthIn), Num(m.HeightIn),
-                m.Bounds.X.ToString(CultureInfo.InvariantCulture), m.Bounds.Y.ToString(CultureInfo.InvariantCulture) });
+                m.Bounds.X.ToString(CultureInfo.InvariantCulture), m.Bounds.Y.ToString(CultureInfo.InvariantCulture),
+                m.WorkW.ToString(CultureInfo.InvariantCulture), m.WorkH.ToString(CultureInfo.InvariantCulture) });
             if (Config.IniRead(Section, m.Key, "") != line) Config.IniWrite(Section, m.Key, line);
         }
 
@@ -82,6 +84,12 @@ namespace Slotter
             if (int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out x)
                 && int.TryParse(parts[4], NumberStyles.Integer, CultureInfo.InvariantCulture, out y))
                 m.Bounds = new System.Drawing.Rectangle(x, y, w, h);
+            if (parts.Length >= 7)
+            {
+                int workW, workH;
+                if (int.TryParse(parts[5], out workW) && int.TryParse(parts[6], out workH) && workW > 0 && workH > 0 && workW <= w && workH <= h)
+                { m.WorkW = workW; m.WorkH = workH; }
+            }
             return m;
         }
 
@@ -105,6 +113,7 @@ namespace Slotter
                 MonitorInfo m = new MonitorInfo
                 {
                     Key = key, Ordinal = i + 1, Online = true, Bounds = s.Bounds, PixelW = s.Bounds.Width, PixelH = s.Bounds.Height,
+                    WorkW = s.WorkingArea.Width, WorkH = s.WorkingArea.Height,
                     Name = DisplayNames.For(s.DeviceName, SystemInformation.TerminalServerSession ? "RDP" : s.Bounds.Width + " × " + s.Bounds.Height)
                 };
                 int wcm, hcm;
