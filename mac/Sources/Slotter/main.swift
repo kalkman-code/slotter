@@ -39,6 +39,9 @@ mainMenu.addItem(windowItem)
 application.mainMenu = mainMenu
 
 let controller = AppController(openSettings: wantsSettings)
+let updatesItem = appMenu.insertItem(withTitle: "Check for Updates…", action: #selector(AppController.checkForUpdates(_:)), keyEquivalent: "", at: 0)
+updatesItem.target = controller
+appMenu.insertItem(.separator(), at: 1)
 let editItem = NSMenuItem()
 let editMenu = NSMenu(title: "Edit")
 let undoItem = editMenu.addItem(withTitle: "Undo", action: #selector(AppController.undoLayout(_:)), keyEquivalent: "z")

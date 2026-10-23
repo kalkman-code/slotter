@@ -8,6 +8,7 @@ public final class SettingsWindowController: NSObject {
 
     private var window: NSWindow?
     private var model: SettingsModel?
+    private var spaceRefreshTimer: Timer?
 
     public var canUndoLayout: Bool { model?.canUndoLayout ?? false }
     public var canRedoLayout: Bool { model?.canRedoLayout ?? false }
@@ -48,6 +49,9 @@ public final class SettingsWindowController: NSObject {
         window.center()
 
         self.window = window
+        spaceRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshSpaces() }
+        }
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
     }
@@ -68,13 +72,25 @@ public final class SettingsWindowController: NSObject {
     }
 
     private func close() {
+        spaceRefreshTimer?.invalidate()
+        spaceRefreshTimer = nil
         window?.orderOut(nil)
         window = nil
         model = nil
     }
+
+    private func refreshSpaces() {
+        guard let model else { return }
+        let snapshot = SpaceRegistry.shared.snapshot()
+        if model.status.spaceSnapshot != snapshot { model.status.spaceSnapshot = snapshot }
+    }
 }
 
 extension SettingsWindowController: NSWindowDelegate {
+    public func windowDidBecomeKey(_ notification: Notification) {
+        refreshSpaces()
+    }
+
     public func windowShouldClose(_ sender: NSWindow) -> Bool {
         requestClose()
         return false

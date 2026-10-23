@@ -34,6 +34,7 @@ namespace Slotter
         DesignerWindow settingsWindow;
         VirtualDesktops desktopWatcher;
         DesktopSnapshot desktopSnapshot;
+        UpdateController updater;
 
         List<Profile> profiles = new List<Profile>();
         List<ProgItem> programsLib = new List<ProgItem>();
@@ -51,6 +52,7 @@ namespace Slotter
         string manualProfile = "";
         Guid? lastKnownDesktopId;
         int launching;
+        int launchGeneration;
 
         public static System.Drawing.Icon TrayIcon;
         public static BitmapFrame WindowIcon;
@@ -64,6 +66,9 @@ namespace Slotter
         {
             base.OnStartup(e);
             string[] args = e.Args;
+            if (UpdateInstaller.RecoverStartup(args)) { Shutdown(); return; }
+            if (UpdateInstaller.RunHelper(args)) { Shutdown(); return; }
+            if (UpdateTestHarness.Run(args)) { Shutdown(); return; }
 
             commandMessage = RegisterWindowMessage("SlotterCommand");
 
@@ -82,7 +87,10 @@ namespace Slotter
             // Slotter must run elevated to snap elevated windows (UIPI denies
             // SetWindowPos upward). Relaunch under UAC before anything else opens, so
             // the single-instance mutex below is the elevated instance.
-            if (!Presence.IsElevated())
+            // Update helpers inherit the current token. Re-elevating here would end the
+            // acknowledged process before its elevated replacement is ready, causing rollback.
+            bool updateRelaunch = args.Length > 0 && (args[0] == "--updated" || args[0] == "--update-failed");
+            if (!updateRelaunch && !Presence.IsElevated())
             {
                 try
                 {
@@ -133,12 +141,14 @@ namespace Slotter
             snapEngine.Start();
             desktopWatcher = new VirtualDesktops(Dispatcher);
             desktopWatcher.Changed += OnDesktopChanged;
-            desktopSnapshot = desktopWatcher.Current;
-            lastKnownDesktopId = desktopSnapshot.CurrentId;
-            ApplyDesktopProfile();
+            OnDesktopChanged(desktopWatcher.Current);
             SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
 
             BuildTray();
+            UpdateInstaller.ConfirmStartup(args);
+            updater = new UpdateController(Quit);
+            if (args.Length == 2 && args[0] == "--update-failed" && File.Exists(args[1]))
+                Toast.Show("Update could not be completed", File.ReadAllText(args[1]), false);
 
             if (args.Length > 0 && string.Equals(args[0], "--settings", StringComparison.OrdinalIgnoreCase))
                 Dispatcher.BeginInvoke(new Action(OpenSettings));
@@ -244,6 +254,7 @@ namespace Slotter
 
         void OnDisplaySettingsChanged(object sender, EventArgs e)
         {
+            Interlocked.Increment(ref launchGeneration);
             Dispatcher.BeginInvoke(new Action(delegate
             {
                 if (snapEngine != null) snapEngine.CloseTargets();
@@ -255,8 +266,12 @@ namespace Slotter
         void OnDesktopChanged(DesktopSnapshot snapshot)
         {
             Guid? previous = lastKnownDesktopId;
+            if (previous != snapshot.CurrentId) Interlocked.Increment(ref launchGeneration);
             if (previous != snapshot.CurrentId && snapEngine != null) snapEngine.CloseTargets();
             desktopSnapshot = snapshot;
+            bool changed = false;
+            foreach (Profile profile in profiles) if (Config.ReconcileDesktops(profile, snapshot)) changed = true;
+            if (changed) Config.SaveProfiles(profiles);
             ApplyDesktopProfile();
             if (snapshot.Available)
             {
@@ -306,6 +321,9 @@ namespace Slotter
                     Log.Write("discarded legacy desktop bindings; virtual plates now belong to workspaces");
                 Config.WriteDesktopBindings(new Dictionary<string, string>());
             }
+            bool reconciled = false;
+            foreach (Profile profile in profiles) if (Config.ReconcileDesktops(profile, desktopSnapshot)) reconciled = true;
+            if (reconciled) Config.SaveProfiles(profiles);
             activeProfile = Config.IniRead("Panel", "LastProfile", "");
             startWithWindows = Config.IniRead("Settings", "StartWithWindows", "0") == "1";
             hotkeyEnabled = Config.IniRead("Settings", "HotkeyEnabled", "1") != "0";
@@ -355,7 +373,8 @@ namespace Slotter
                     continue;
                 }
                 int apps = 0;
-                foreach (Zone z in p.Zones) if (!string.IsNullOrEmpty(z.Prog)) apps++;
+                Profile plan = Config.ForDesktop(p, desktopSnapshot == null || !desktopSnapshot.Available ? null : desktopSnapshot.CurrentId);
+                foreach (Zone z in plan.Zones) if (!string.IsNullOrEmpty(z.Prog)) apps++;
                 MenuItem item = Tray.Item(p.Name, apps == 0 ? "No apps" : apps == 1 ? "1 app" : apps + " apps", delegate { ActivateProfile(captured); });
                 if (string.Equals(p.Name, activeProfile, StringComparison.OrdinalIgnoreCase)) item.FontWeight = System.Windows.FontWeights.SemiBold;
                 items.Add(item);
@@ -369,6 +388,7 @@ namespace Slotter
             items.Add(Tray.Rule());
 
             items.Add(Tray.Item("Settings…", null, delegate { OpenSettings(); }));
+            items.Add(Tray.Item("Check for updates…", null, async delegate { await updater.Check(true); }));
 
             items.Add(Tray.Toggle("Start with Windows", startWithWindows, delegate
             {
@@ -426,28 +446,35 @@ namespace Slotter
                 return;
             }
             activeProfile = p.Name;
+            int generation = Interlocked.Increment(ref launchGeneration);
             manualProfile = p.Name;
             Config.IniWrite("Panel", "LastProfile", p.Name);
             List<ProgItem> lib = programsLib;
+            Profile plan = Config.ForDesktop(p, desktopSnapshot == null || !desktopSnapshot.Available ? null : desktopSnapshot.CurrentId);
             int apps = 0;
             System.Windows.Forms.Screen[] screens = System.Windows.Forms.Screen.AllScreens;
-            foreach (Zone zone in p.Zones) if (!string.IsNullOrEmpty(zone.Prog) && Config.ResolveScreenIndex(zone, screens) >= 0) apps++;
+            foreach (Zone zone in plan.Zones) if (!string.IsNullOrEmpty(zone.Prog) && Config.ResolveScreenIndex(zone, screens) >= 0) apps++;
             if (apps == 0)
             {
                 Interlocked.Exchange(ref launching, 0);
-                if (p.Zones.Count == 0) Toast.Show(p.Name + " has no zones", "Open Settings and choose a layout preset.", false);
-                else Toast.Show(p.Name + " is ready", p.Zones.Count == 1 ? "1 manual snap zone is active." : p.Zones.Count + " manual snap zones are active.", true);
+                if (plan.Zones.Count == 0) Toast.Show(p.Name + " has no zones", "Open Settings and choose a layout preset.", false);
+                else Toast.Show(p.Name + " is ready", plan.Zones.Count == 1 ? "1 manual snap zone is active." : plan.Zones.Count + " manual snap zones are active.", true);
                 return;
             }
             Toast.Show("Launching " + p.Name, apps == 1 ? "Opening and placing 1 app…" : "Opening and placing " + apps + " apps…", true);
             Thread t = new Thread(delegate()
             {
-                LaunchResult result = LaunchEngine.LaunchApps(p, lib);
+                LaunchResult result = LaunchEngine.LaunchApps(plan, lib, delegate { return Volatile.Read(ref launchGeneration) == generation; });
                 Interlocked.Exchange(ref launching, 0);
                 try
                 {
                     Dispatcher.BeginInvoke(new Action(delegate
                     {
+                        if (result.Cancelled)
+                        {
+                            Toast.Show("Launch stopped", "The desktop or display changed. Launch the workspace again on this desktop.", false);
+                            return;
+                        }
                         string placed = result.Placed + " of " + result.Planned + (result.Planned == 1 ? " app placed." : " apps placed.");
                         if (result.Placed == result.Planned) Toast.Show(p.Name + " launched.", placed, true);
                         else Toast.Show(p.Name + " launched.", placed, false, result.FirstError ?? "Check slotter.log.");
@@ -471,6 +498,8 @@ namespace Slotter
             settingsWindow = new DesignerWindow(profiles, activeProfile, programsLib, startWithWindows, hotkeyEnabled, hotkeyReady,
                 shortcuts, snapShortcutsEnabled, shortcutReady, followDesktop, desktopSnapshot, desktopBindings);
             settingsWindow.Saved += OnSettingsSaved;
+            settingsWindow.CheckUpdates += async delegate { await updater.Check(true); };
+            settingsWindow.AutomaticUpdatesChanged += updater.SetAutomatic;
             settingsWindow.RecordingChanged += SetShortcutRecording;
             settingsWindow.WorkspaceSet += delegate (string name)
             {
@@ -528,6 +557,7 @@ namespace Slotter
                 UnregisterShortcuts();
                 if (desktopWatcher != null) desktopWatcher.Dispose();
                 if (tray != null) tray.Dispose();
+                if (updater != null) updater.Dispose();
                 if (messages != null) messages.Dispose();
                 if (instance != null) { instance.Dispose(); instance = null; }
             }

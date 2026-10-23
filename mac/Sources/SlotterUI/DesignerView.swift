@@ -45,6 +45,9 @@ public struct DesignerView: View {
         }
         .background(P.ground)
         .environment(\.colorScheme, .dark)
+        .alert("Show desktop", isPresented: Binding(get: { model.desktopSwitchMessage != nil }, set: { if !$0 { model.desktopSwitchMessage = nil } })) {
+            Button("OK") { model.desktopSwitchMessage = nil }
+        } message: { Text(model.desktopSwitchMessage ?? "") }
         .frame(minWidth: 640, minHeight: 560)
     }
 }

@@ -3,9 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-VERSION="$(tr -d '[:space:]' < "$PROJECT_DIR/VERSION")"
-SHORT_VERSION="${VERSION%%-*}"
-BUILD_NUMBER="$(git -C "$PROJECT_DIR" rev-list --count HEAD)"
+VERSION="${SLOTTER_VERSION:-$(tr -d '[:space:]' < "$PROJECT_DIR/VERSION")}"
+BUILD_NUMBER="${SLOTTER_BUILD:-$(git -C "$PROJECT_DIR" rev-list --count HEAD)}"
 IDENTITY="Developer ID Application: Toby Kalkman (YNL35YT683)"
 KEY_DIR="$HOME/.appstoreconnect"
 APP="$PROJECT_DIR/dist/Slotter.app"
@@ -52,17 +51,18 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/Fonts" "$STAGING_DIR/Slo
 cp "$BIN/Slotter" "$APP/Contents/MacOS/Slotter"
 strip -x -S "$APP/Contents/MacOS/Slotter"
 cp "$SCRIPT_DIR/Resources/Info.plist" "$APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $SHORT_VERSION" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
+[ -z "${SLOTTER_PUBLIC_KEY:-}" ] || plutil -replace SUPublicEDKey -string "$SLOTTER_PUBLIC_KEY" "$APP/Contents/Info.plist"
+[ -z "${SLOTTER_FEED_URL:-}" ] || plutil -replace SUFeedURL -string "$SLOTTER_FEED_URL" "$APP/Contents/Info.plist"
 cp ../fonts/*.ttf ../fonts/OFL.txt "$APP/Contents/Resources/Fonts/"
 cp "$PROJECT_DIR/LICENSE" "$APP/Contents/Resources/LICENSE"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 "$BIN/slotter-icongen" ../Slotter.svg "$STAGING_DIR/Slotter.iconset"
 iconutil -c icns -o "$APP/Contents/Resources/Slotter.icns" "$STAGING_DIR/Slotter.iconset"
 
+bash "$SCRIPT_DIR/scripts/package-sparkle.sh" "$APP" "$IDENTITY" "$SCRIPT_DIR/Slotter-release.entitlements"
 python3 "$LEAK_SCANNER" "$APP"
-codesign --force --sign "$IDENTITY" --identifier uk.co.kalkman.slotter \
-    --options runtime --timestamp --entitlements "$SCRIPT_DIR/Slotter-release.entitlements" "$APP"
 codesign --verify --deep --strict "$APP"
 ditto -c -k --keepParent "$APP" "$STAGING_DIR/Slotter.zip"
 xcrun notarytool submit "$STAGING_DIR/Slotter.zip" \

@@ -36,6 +36,26 @@ Args1=
     #expect(document.bool("Settings", "StartAtLogin"))
 }
 
+@Test @MainActor func corruptCountsCannotTurnASmallConfigIntoBillionsOfLookups() {
+    let config = ConfigStore.parse(IniDocument(text: """
+    [Profiles]
+    List=R3 QA
+    [R3 QA]
+    VirtualPlateCount=2147483647
+    VirtualPlate1ID=AC8CDB8A-E317-4AC2-859B-B18FF7885CA1
+    VirtualPlate1Monitor=1|screen||0
+    Zone1=1,nan,inf,-20,200
+    [Programs]
+    Count=2147483647
+    Name1=Editor
+    Exe1=/usr/bin/true
+    """))
+    #expect(config.workspaces.count == 1)
+    #expect(config.workspaces.first?.virtualPlates.count == 1)
+    #expect(config.programs.map(\.name) == ["Editor"])
+    #expect(config.workspaces.flatMap(\.zones).allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.w.isFinite && $0.h.isFinite })
+}
+
 @Test func roundTripsUnchangedTextByteForByte() {
     let document = IniDocument(text: sample)
     #expect(document.serialized() == sample + "\n")
@@ -224,6 +244,32 @@ private struct FakeSpaceRegistry: SpaceRegistryProviding {
     func snapshot() -> SpaceSnapshot { value }
 }
 
+@Test func launchPlanUsesEachDisplaysCurrentPlateWithoutLaunchingBenchedOrOtherDesktops() {
+    let a = MonitorRef(ordinal: 1, uuid: "screen-a")
+    let b = MonitorRef(ordinal: 2, uuid: "screen-b")
+    let active = VirtualPlate(name: "Current", monitor: a, desktopID: "space-a")
+    let other = VirtualPlate(name: "Other", monitor: a, desktopID: "space-other")
+    let bench = VirtualPlate(name: "Saved", monitor: b, desktopID: nil)
+    let physicalA = Zone(monitor: a, x: 0, y: 0, w: 100, h: 100, program: "Wrong physical")
+    let physicalB = Zone(monitor: b, x: 0, y: 0, w: 100, h: 100, program: "Physical B")
+    let current = Zone(monitor: a, x: 0, y: 0, w: 50, h: 100, program: "Writer", plateID: active.id)
+    let inactive = Zone(monitor: a, x: 50, y: 0, w: 50, h: 100, program: "Other", plateID: other.id)
+    let benched = Zone(monitor: b, x: 0, y: 0, w: 100, h: 100, program: "Saved", plateID: bench.id)
+    let workspace = Workspace(name: "Desk", zones: [physicalA, physicalB, current, inactive, benched],
+                              virtualPlates: [active, other, bench])
+    let space = ManagedSpace(uuid: "space-a", id: 1, type: 0, ordinal: 1, label: "Desktop 1")
+    let registry = FakeSpaceRegistry(value: SpaceSnapshot(available: true, displays: [
+        ManagedDisplaySpaces(displayUUID: "screen-a", displayName: "A", spaces: [space], currentSpaceUUID: space.uuid),
+        ManagedDisplaySpaces(displayUUID: "screen-b", displayName: "B", spaces: [], currentSpaceUUID: nil)
+    ]))
+    let plan = VirtualPlateResolver(registry: registry).workspaceForLaunch(workspace)
+    #expect(plan.zones == [physicalB, current])
+    #expect(plan.id == workspace.id)
+    #expect(workspace.zones.count == 5)
+    let unavailable = FakeSpaceRegistry(value: SpaceSnapshot(available: false))
+    #expect(VirtualPlateResolver(registry: unavailable).workspaceForLaunch(workspace).zones == [physicalA, physicalB])
+}
+
 @Test func virtualPlateResolutionFallsBackToManualWorkspacePerDisplay() {
     let monitor = MonitorRef(ordinal: 1, uuid: "screen-a")
     let physical = Zone(monitor: monitor, x: 0, y: 0, w: 50, h: 100)
@@ -245,6 +291,30 @@ private struct FakeSpaceRegistry: SpaceRegistryProviding {
     #expect(result.workspacesByDisplay["screen-a"]?.id == first.id)
     #expect(result.workspacesByDisplay["screen-b"]?.id == first.id)
     #expect(result.workspacesByDisplay["screen-a"]?.zones == [physical])
+}
+
+@Test func independentDisplaysKeepTheirOwnLaunchPlateWhenOneDesktopChanges() {
+    let a = MonitorRef(ordinal: 1, uuid: "screen-a")
+    let b = MonitorRef(ordinal: 2, uuid: "screen-b")
+    let a1 = ManagedSpace(uuid: "a1", id: 1, type: 0, ordinal: 1, label: "Desktop 1")
+    let a2 = ManagedSpace(uuid: "a2", id: 2, type: 0, ordinal: 2, label: "Desktop 2")
+    let b1 = ManagedSpace(uuid: "b1", id: 3, type: 0, ordinal: 1, label: "Desktop 1")
+    let b2 = ManagedSpace(uuid: "b2", id: 4, type: 0, ordinal: 2, label: "Desktop 2")
+    let plates = [(a, a1), (a, a2), (b, b1), (b, b2)].map {
+        VirtualPlate(name: $0.1.uuid, monitor: $0.0, desktopID: $0.1.uuid)
+    }
+    let zones = plates.map { Zone(monitor: $0.monitor, x: 0, y: 0, w: 100, h: 100, program: $0.name, plateID: $0.id) }
+    let workspace = Workspace(name: "Independent", zones: zones, virtualPlates: plates)
+    func plan(_ currentA: String) -> Workspace {
+        let registry = FakeSpaceRegistry(value: SpaceSnapshot(available: true, displays: [
+            ManagedDisplaySpaces(displayUUID: "screen-a", displayName: "A", spaces: [a1, a2], currentSpaceUUID: currentA),
+            ManagedDisplaySpaces(displayUUID: "screen-b", displayName: "B", spaces: [b1, b2], currentSpaceUUID: "b1")
+        ]))
+        return VirtualPlateResolver(registry: registry).workspaceForLaunch(workspace)
+    }
+    #expect(plan("a1").zones == [zones[0], zones[2]])
+    #expect(plan("a2").zones == [zones[1], zones[2]])
+    #expect(workspace.zones == zones)
 }
 
 @Test func virtualPlateResolutionSelectsPinnedWorkspaceOnMatchingDesktop() {

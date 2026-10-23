@@ -72,12 +72,40 @@ public struct VirtualPlate: Sendable, Hashable, Identifiable {
     public var name: String
     public var monitor: MonitorRef
     public var desktopID: String?
+    public var followsDesktopName: Bool
+    public var closedDesktopLabel: String?
 
-    public init(id: UUID = UUID(), name: String, monitor: MonitorRef, desktopID: String?) {
+    public init(id: UUID = UUID(), name: String, monitor: MonitorRef, desktopID: String?,
+                followsDesktopName: Bool? = nil, closedDesktopLabel: String? = nil) {
         self.id = id
         self.name = name
         self.monitor = monitor
         self.desktopID = desktopID
+        self.followsDesktopName = followsDesktopName ?? (name.range(of: #"^Desktop [1-9][0-9]*$"#, options: .regularExpression) != nil)
+        self.closedDesktopLabel = closedDesktopLabel
+    }
+}
+
+extension Workspace {
+    @discardableResult
+    public mutating func reconcileDesktops(_ snapshot: SpaceSnapshot) -> Bool {
+        guard snapshot.available else { return false }
+        let before = virtualPlates
+        for index in virtualPlates.indices {
+            let plate = virtualPlates[index]
+            guard let id = plate.desktopID,
+                  let display = snapshot.displays.first(where: {
+                      if let uuid = plate.monitor.uuid { return uuid.caseInsensitiveCompare($0.displayUUID) == .orderedSame }
+                      return DisplayRegistry.resolve(plate.monitor)?.uuid.caseInsensitiveCompare($0.displayUUID) == .orderedSame
+                  }), !display.spaces.isEmpty else { continue }
+            if let desktop = display.spaces.first(where: { $0.uuid == id && $0.type == 0 }) {
+                if plate.followsDesktopName { virtualPlates[index].name = desktop.label }
+            } else {
+                virtualPlates[index].desktopID = nil
+                virtualPlates[index].closedDesktopLabel = plate.name
+            }
+        }
+        return before != virtualPlates
     }
 }
 
@@ -104,17 +132,19 @@ public struct SlotterConfig: Sendable {
     public var lastWorkspace: String
     public var startAtLogin: Bool
     public var shortcuts: [String: String]
+    public var desktopSetups: [DesktopSetup]
 
     public init(workspaces: [Workspace] = [],
                 programs: [Program] = [],
                 lastWorkspace: String = "",
                 startAtLogin: Bool = false,
-                shortcuts: [String: String] = [:]) {
+                shortcuts: [String: String] = [:], desktopSetups: [DesktopSetup] = []) {
         self.workspaces = workspaces
         self.programs = programs
         self.lastWorkspace = lastWorkspace
         self.startAtLogin = startAtLogin
         self.shortcuts = shortcuts
+        self.desktopSetups = desktopSetups
     }
 
     public func workspace(named name: String) -> Workspace? {
@@ -126,8 +156,15 @@ public struct SlotterConfig: Sendable {
     }
 }
 
+public struct DesktopSetup: Sendable, Hashable, Identifiable {
+    public var name: String
+    public var zones: [Zone]
+    public var id: String { name }
+    public init(name: String, zones: [Zone]) { self.name = name; self.zones = zones }
+}
+
 public enum Validate {
-    public static let reservedSections: Set<String> = ["profiles", "programs", "panel", "settings", "shortcuts", "spacebindings", "virtualplates"]
+    public static let reservedSections: Set<String> = ["profiles", "programs", "panel", "settings", "shortcuts", "spacebindings", "virtualplates", "desktopsetups"]
 
     public static func workspaceName(_ raw: String, excluding existing: Workspace? = nil, in workspaces: [Workspace]) -> String? {
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)

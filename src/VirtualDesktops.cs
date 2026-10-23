@@ -31,6 +31,60 @@ namespace Slotter
 
     public sealed class VirtualDesktops : IDisposable
     {
+        [ComImport, Guid("6D5140C1-7436-11CE-8034-00AA006009FA"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface ShellServices
+        {
+            void QueryService(ref Guid service, ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out object result);
+        }
+
+        // Windows 11 24H2/25H2 ABI. QueryInterface fails safely if Explorer changes it.
+        [ComImport, Guid("53F5CA0B-158F-4124-900C-057158060B27"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface DesktopManager
+        {
+            void GetCount(out uint count);
+            void MoveView(IntPtr view, IntPtr desktop);
+            void CanMoveView(IntPtr view, out int canMove);
+            void GetCurrent(out IntPtr desktop);
+            void GetDesktops(out IntPtr desktops);
+            void GetAdjacent(IntPtr desktop, uint direction, out IntPtr adjacent);
+            void SwitchDesktop(IntPtr desktop);
+            void SwitchAndMoveForeground(IntPtr desktop);
+            void Create(out IntPtr desktop);
+            void MoveDesktop(IntPtr desktop, uint index);
+            void Remove(IntPtr desktop, IntPtr fallback);
+            void FindDesktop(ref Guid id, out IntPtr desktop);
+        }
+
+        public static string ShowDesktop(string desktopId)
+        {
+            Guid id;
+            if (!Guid.TryParse(desktopId, out id)) return "This desktop is no longer available.";
+            object shell = null, manager = null;
+            IntPtr desktop = IntPtr.Zero;
+            try
+            {
+                if (!Read().Desktops.Exists(d => d.Id == id)) return "This desktop is no longer available. Choose another desktop for the plate.";
+                shell = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("C2F03A33-21F5-47FA-B4BB-156362A2F239")));
+                Guid service = new Guid("C5E0CDCA-7B6E-41B2-9FC4-D93975CC467B"), iid = typeof(DesktopManager).GUID;
+                ((ShellServices)shell).QueryService(ref service, ref iid, out manager);
+                ((DesktopManager)manager).FindDesktop(ref id, out desktop);
+                if (desktop == IntPtr.Zero) return "This desktop is no longer available.";
+                ((DesktopManager)manager).SwitchDesktop(desktop);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Log.Write("show desktop: " + ex.Message);
+                return "Windows could not switch desktops. This requires the Windows 11 24H2 or later virtual desktop API. Use Task View if Explorer is unavailable.";
+            }
+            finally
+            {
+                if (desktop != IntPtr.Zero) Marshal.Release(desktop);
+                if (manager != null && Marshal.IsComObject(manager)) Marshal.ReleaseComObject(manager);
+                if (shell != null && Marshal.IsComObject(shell)) Marshal.ReleaseComObject(shell);
+            }
+        }
+
         const string Path = @"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops";
         const uint NotifyChangeName = 1, NotifyChangeLastSet = 4, WaitObject0 = 0;
         [DllImport("advapi32.dll", SetLastError = true)] static extern int RegNotifyChangeKeyValue(SafeRegistryHandle key, bool subtree, uint filter, IntPtr eventHandle, bool asynchronous);

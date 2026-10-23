@@ -178,6 +178,7 @@ private struct ProgramForm: View {
             VStack(alignment: .leading, spacing: 6) {
                 Eyebrow("Name")
                 field(InkTextField(text: $name, font: T.font(T.type.body), focus: $nameFocused), invalid: nameError != nil)
+                    .accessibilityLabel("Program name")
                 if let nameError { hint(nameError, error: true) }
             }
             VStack(alignment: .leading, spacing: 6) {
@@ -185,6 +186,7 @@ private struct ProgramForm: View {
                 HStack(spacing: 6) {
                     field(InkTextField(text: binding(\.path), font: T.font(T.type.body), focus: $pathFocused),
                           invalid: path.isEmpty)
+                        .accessibilityLabel("Executable or app")
                     Button("Browse…", action: browse).buttonStyle(InkButtonStyle(height: 34))
                 }
                 if path.isEmpty {
@@ -199,6 +201,7 @@ private struct ProgramForm: View {
                 Eyebrow("Arguments, optional")
                 field(InkTextField(text: binding(\.arguments), font: T.font(T.type.body), placeholder: "--new-window",
                                    focus: $argsFocused), invalid: false)
+                    .accessibilityLabel("Arguments, optional")
             }
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {

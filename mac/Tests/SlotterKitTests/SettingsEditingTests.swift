@@ -113,6 +113,67 @@ import Foundation
     #expect(persisted?.workspaces.first?.virtualPlates.first?.name == "Writing")
 }
 
+@Test @MainActor func desktopOrdinalsBelongToTheirOwnDisplay() {
+    let first = ManagedSpace(uuid: "a", id: 1, type: 0, ordinal: 1, label: "Desktop 1")
+    let second = ManagedSpace(uuid: "b", id: 2, type: 0, ordinal: 1, label: "Desktop 1")
+    let model = editor()
+    model.status.spaceSnapshot = SpaceSnapshot(available: true, displays: [
+        ManagedDisplaySpaces(displayUUID: "screen", displayName: "A", spaces: [first], currentSpaceUUID: "a"),
+        ManagedDisplaySpaces(displayUUID: "second", displayName: "B", spaces: [second], currentSpaceUUID: "b")
+    ])
+    #expect(model.desktopOrdinal("a") == 1)
+    #expect(model.desktopOrdinal("b") == 1)
+    #expect(model.desktopOrdinal("deleted") == 0)
+}
+
+@Test @MainActor func addingVirtualPlateStartsEmptyUntilSetUp() throws {
+    let model = editor()
+    let before = try #require(model.selectedWorkspace?.zones)
+    let monitor = try #require(model.desk.placements.first?.monitor)
+    let desktop = ManagedSpace(uuid: "space-new", id: 42, type: 0, ordinal: 2, label: "Desktop 2")
+
+    model.addVirtualPlate(on: monitor, desktop: desktop)
+
+    let plate = try #require(model.selectedWorkspace?.virtualPlates.first)
+    #expect(model.selectedWorkspace?.zones == before)
+    #expect(model.selectedWorkspace?.zones.contains(where: { $0.plateID == plate.id }) == false)
+    model.useVirtualMonitor(plate.id)
+    #expect(model.selectedWorkspace?.zones.filter { $0.plateID == plate.id }.count == 1)
+    #expect(model.selectedWorkspace?.zones.first(where: { $0.plateID == plate.id })?.program == nil)
+}
+
+@Test @MainActor func pinnedPlatesFollowDesktopOrderAndClosedPlatesMoveToBench() throws {
+    let model = editor()
+    let monitor = MonitorRef(ordinal: 1, uuid: "screen")
+    let plates = [
+        VirtualPlate(name: "Desktop 2", monitor: monitor, desktopID: "gone"),
+        VirtualPlate(name: "Desktop 3", monitor: monitor, desktopID: "third"),
+        VirtualPlate(name: "Desktop 2", monitor: monitor, desktopID: "first"),
+        VirtualPlate(name: "Writing", monitor: monitor, desktopID: "second"),
+        VirtualPlate(name: "Bench", monitor: monitor, desktopID: nil)
+    ]
+    model.workspaces[0].virtualPlates = plates
+    model.status.spaceSnapshot = SpaceSnapshot(available: true, displays: [
+        ManagedDisplaySpaces(displayUUID: "screen", displayName: "Screen", spaces: [
+            ManagedSpace(uuid: "first", id: 1, type: 0, ordinal: 1, label: "Desktop 1"),
+            ManagedSpace(uuid: "second", id: 2, type: 0, ordinal: 2, label: "Desktop 2"),
+            ManagedSpace(uuid: "third", id: 3, type: 0, ordinal: 3, label: "Desktop 3")
+        ], currentSpaceUUID: "first")
+    ])
+
+    let ordered = model.pinnedVirtualPlates(in: try #require(model.selectedWorkspace))
+    #expect(ordered.map(\.id) == [plates[2].id, plates[3].id, plates[1].id])
+    #expect(ordered.map { model.virtualPlateName($0) } == ["Desktop 1", "Writing", "Desktop 3"])
+    #expect(model.workspaces[0].virtualPlates[0].desktopID == nil)
+    #expect(model.workspaces[0].virtualPlates[0].closedDesktopLabel == "Desktop 2")
+
+    model.status.spaceSnapshot.displays[0].spaces.removeFirst()
+    model.status.spaceSnapshot.displays[0].spaces[0].ordinal = 1
+    model.status.spaceSnapshot.displays[0].spaces[1].ordinal = 2
+    #expect(model.virtualPlateName(plates[1]) == "Desktop 2")
+    #expect(model.virtualPlateName(plates[3]) == "Writing")
+}
+
 @Test @MainActor func deletingBenchedPlateAfterConfirmationPersistsRemoval() throws {
     let monitor = MonitorRef(ordinal: 1, uuid: "screen")
     let plate = VirtualPlate(name: "Research", monitor: monitor, desktopID: nil)
@@ -135,6 +196,28 @@ import Foundation
     #expect(model.selectedWorkspace?.zones.isEmpty == true)
     #expect(persisted?.workspaces.first?.virtualPlates.isEmpty == true)
     #expect(persisted?.workspaces.first?.zones.isEmpty == true)
+}
+
+@Test @MainActor func deletingSelectedPlateSelectsRemainingZoneAndUndoRestoresPlateSelection() throws {
+    let model = editor()
+    let monitor = try #require(model.desk.placements.first?.monitor)
+    model.addVirtualPlate(on: monitor, desktop: ManagedSpace(uuid: "test", id: 2, type: 0, ordinal: 2, label: "Desktop 2"))
+    let plateID = try #require(model.selectedVirtualPlateID)
+    model.useVirtualMonitor(plateID)
+    let virtualZoneID = model.selectedZoneID
+    model.benchVirtualPlate(plateID)
+    model.selectVirtualPlate(plateID)
+    model.confirmDeleteBenchedPlate(plateID)
+    model.pendingConfirm?.action()
+    #expect(model.selectedZone != nil)
+    #expect(model.selectedZone?.plateID == nil)
+    #expect(model.selectedVirtualPlateID == nil)
+    model.undoLayout()
+    #expect(model.selectedZoneID == virtualZoneID)
+    #expect(model.selectedVirtualPlateID == plateID)
+    model.redoLayout()
+    #expect(model.selectedZone != nil)
+    #expect(model.selectedZone?.plateID == nil)
 }
 
 @Test @MainActor func structuralEditStartsANewUndoStepAfterTyping() throws {

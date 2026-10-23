@@ -153,6 +153,8 @@ public final class ConfigStore {
                 pairs.append(("VirtualPlate\(n)ID", plate.id.uuidString))
                 pairs.append(("VirtualPlate\(n)Name", plate.name))
                 pairs.append(("VirtualPlate\(n)Desktop", plate.desktopID ?? ""))
+                pairs.append(("VirtualPlate\(n)AutoName", plate.followsDesktopName ? "1" : "0"))
+                pairs.append(("VirtualPlate\(n)ClosedDesktop", plate.closedDesktopLabel ?? ""))
                 pairs.append(("VirtualPlate\(n)Monitor", "\(plate.monitor.ordinal)|\(plate.monitor.uuid ?? "")|\(plate.monitor.legacyKey ?? "")|\(plate.monitor.duplicateIndex)"))
             }
             pairs.append(("VirtualPlateCount", String(workspace.virtualPlates.count)))
@@ -176,6 +178,19 @@ public final class ConfigStore {
         document.replaceSection("Shortcuts", removingKeysMatching: { _ in true }, with: pairs)
 
         document.removeSection("SpaceBindings")
+        var setupPairs: [(key: String, value: String)] = [("Count", String(config.desktopSetups.count))]
+        for (index, setup) in config.desktopSetups.enumerated() {
+            let n = index + 1
+            setupPairs.append(("Name\(n)", setup.name))
+            setupPairs.append(("ZoneCount\(n)", String(setup.zones.count)))
+            for (zoneIndex, zone) in setup.zones.enumerated() {
+                let zone = zone.clamped()
+                let key = "\(n)_\(zoneIndex + 1)"
+                setupPairs.append(("Zone\(key)", "\(number(zone.x)),\(number(zone.y)),\(number(zone.w)),\(number(zone.h))"))
+                if let program = zone.program { setupPairs.append(("Program\(key)", program)) }
+            }
+        }
+        document.replaceSection("DesktopSetups", removingKeysMatching: { _ in true }, with: setupPairs)
     }
 
     static func parse(_ document: IniDocument) -> SlotterConfig {
@@ -194,7 +209,7 @@ public final class ConfigStore {
             guard document.hasSection(name) else { continue }
             let stableID = UUID(uuidString: document.string(name, "WorkspaceID")) ?? UUID()
             var workspace = Workspace(name: name, id: stableID)
-            let plateCount = document.int(name, "VirtualPlateCount")
+            let plateCount = min(document.int(name, "VirtualPlateCount"), document.pairs(in: name).count)
             if plateCount > 0 {
                 for plateIndex in 1...plateCount {
                     let prefix = "VirtualPlate\(plateIndex)"
@@ -205,7 +220,9 @@ public final class ConfigStore {
                         id: plateID, name: document.string(name, "\(prefix)Name"),
                         monitor: MonitorRef(ordinal: ordinal, uuid: fields[1].isEmpty ? nil : fields[1],
                                             legacyKey: fields[2].isEmpty ? nil : fields[2], duplicateIndex: duplicate),
-                        desktopID: document.string(name, "\(prefix)Desktop").isEmpty ? nil : document.string(name, "\(prefix)Desktop")))
+                        desktopID: document.string(name, "\(prefix)Desktop").isEmpty ? nil : document.string(name, "\(prefix)Desktop"),
+                        followsDesktopName: document.string(name, "\(prefix)AutoName").isEmpty ? nil : document.bool(name, "\(prefix)AutoName"),
+                        closedDesktopLabel: document.string(name, "\(prefix)ClosedDesktop").isEmpty ? nil : document.string(name, "\(prefix)ClosedDesktop")))
                 }
             }
             var index = 1
@@ -236,7 +253,8 @@ public final class ConfigStore {
             config.workspaces.append(workspace)
         }
 
-        let count = document.int("Programs", "Count")
+        // Records are contiguous; a corrupt count cannot require more lookups than the file has keys.
+        let count = min(document.int("Programs", "Count"), document.pairs(in: "Programs").count)
         for index in stride(from: 1, through: count, by: 1) {
             let name = document.string("Programs", "Name\(index)")
             let path = document.string("Programs", "Exe\(index)")
@@ -247,6 +265,23 @@ public final class ConfigStore {
                                            newInstance: document.bool("Programs", "New\(index)")))
         }
 
+        for index in 0..<max(0, min(1000, document.int("DesktopSetups", "Count"))) {
+            let n = index + 1
+            let name = document.string("DesktopSetups", "Name\(n)")
+            guard !name.isEmpty else { continue }
+            var zones: [Zone] = []
+            for zoneIndex in 0..<max(0, min(400, document.int("DesktopSetups", "ZoneCount\(n)"))) {
+                let key = "\(n)_\(zoneIndex + 1)"
+                let fields = document.string("DesktopSetups", "Zone\(key)").split(separator: ",", omittingEmptySubsequences: false)
+                let values = fields.compactMap { Double($0) }
+                guard fields.count == 4, values.count == 4, values.allSatisfy(\.isFinite),
+                      values[0] >= 0, values[1] >= 0, values[2] >= 1, values[3] >= 1,
+                      values[0] + values[2] <= 100.05, values[1] + values[3] <= 100.05 else { continue }
+                let program = document.string("DesktopSetups", "Program\(key)")
+                zones.append(Zone(monitor: MonitorRef(ordinal: 1), x: values[0], y: values[1], w: values[2], h: values[3], program: program.isEmpty ? nil : program).clamped())
+            }
+            if !zones.isEmpty { config.desktopSetups.append(DesktopSetup(name: name, zones: zones)) }
+        }
         return config
     }
 

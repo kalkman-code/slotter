@@ -29,16 +29,21 @@ public final class SettingsModel {
         public var loginNeedsApproval: Bool
         public var unavailableShortcuts: [String]
         public var spaceSnapshot: SpaceSnapshot
+        public var automaticUpdates: Bool
+        public var canCheckForUpdates: Bool
 
         public init(accessibilityTrusted: Bool = true, shortcutCount: Int = 0, shortcutFailures: Int = 0,
                     loginNeedsApproval: Bool = false, unavailableShortcuts: [String] = [],
-                    spaceSnapshot: SpaceSnapshot = SpaceSnapshot(available: false)) {
+                    spaceSnapshot: SpaceSnapshot = SpaceSnapshot(available: false),
+                    automaticUpdates: Bool = true, canCheckForUpdates: Bool = false) {
             self.accessibilityTrusted = accessibilityTrusted
             self.shortcutCount = shortcutCount
             self.shortcutFailures = shortcutFailures
             self.loginNeedsApproval = loginNeedsApproval
             self.unavailableShortcuts = unavailableShortcuts
             self.spaceSnapshot = spaceSnapshot
+            self.automaticUpdates = automaticUpdates
+            self.canCheckForUpdates = canCheckForUpdates
         }
     }
 
@@ -47,15 +52,21 @@ public final class SettingsModel {
         public var setWorkspace: (Workspace) -> Void
         public var openAccessibilitySettings: () -> Void
         public var openLoginItemsSettings: () -> Void
+        public var setAutomaticUpdates: (Bool) -> Void
+        public var checkForUpdates: () -> Void
 
         public init(save: @escaping (SlotterConfig) -> SlotterConfig? = { $0 },
                     setWorkspace: @escaping (Workspace) -> Void = { _ in },
                     openAccessibilitySettings: @escaping () -> Void = {},
-                    openLoginItemsSettings: @escaping () -> Void = {}) {
+                    openLoginItemsSettings: @escaping () -> Void = {},
+                    setAutomaticUpdates: @escaping (Bool) -> Void = { _ in },
+                    checkForUpdates: @escaping () -> Void = {}) {
             self.save = save
             self.setWorkspace = setWorkspace
             self.openAccessibilitySettings = openAccessibilitySettings
             self.openLoginItemsSettings = openLoginItemsSettings
+            self.setAutomaticUpdates = setAutomaticUpdates
+            self.checkForUpdates = checkForUpdates
         }
     }
 
@@ -74,13 +85,16 @@ public final class SettingsModel {
 
     public var workspaces: [Workspace]
     public var programs: [Program]
+    public var desktopSetups: [DesktopSetup]
     public var lastWorkspace: String
     public var startAtLogin: Bool
     public var shortcuts: [String: String]
 
     public var snapshot: DisplaySnapshot
     public var remembered: [String: RememberedMonitor]
-    public var status: Status
+    public var status: Status {
+        didSet { reconcileDesktops() }
+    }
     public var actions: Actions
 
     public var selectedWorkspaceID: UUID?
@@ -93,6 +107,7 @@ public final class SettingsModel {
     public var selectedVirtualPlateID: UUID?
     public var selectedBenchedPlateID: UUID?
     public var focusVirtualPlateName = false
+    public var desktopSwitchMessage: String?
     public var selectedProgramID: UUID?
     public var pendingConfirm: PendingConfirm?
     public var focusRequest: FocusTarget?
@@ -104,7 +119,9 @@ public final class SettingsModel {
         var lastWorkspace: String
         var selectedWorkspaceID: UUID?
         var selectedZoneID: UUID?
+        var selectedVirtualPlateID: UUID?
         var selectedProgramID: UUID?
+        var face: Face?
     }
     private var undoStates: [LayoutState] = []
     private var redoStates: [LayoutState] = []
@@ -127,7 +144,8 @@ public final class SettingsModel {
     private func captureLayout() -> LayoutState {
         LayoutState(workspaces: workspaces, programs: programs, lastWorkspace: lastWorkspace,
                     selectedWorkspaceID: selectedWorkspaceID, selectedZoneID: selectedZoneID,
-                    selectedProgramID: selectedProgramID)
+                    selectedVirtualPlateID: selectedVirtualPlateID,
+                    selectedProgramID: selectedProgramID, face: face)
     }
 
     public func beginGeometryEdit() { editingGeometry = true; recordedEdit = false }
@@ -145,11 +163,13 @@ public final class SettingsModel {
         lastWorkspace = state.lastWorkspace
         selectedWorkspaceID = state.selectedWorkspaceID
         selectedZoneID = state.selectedZoneID
+        selectedVirtualPlateID = state.selectedVirtualPlateID
         selectedProgramID = state.selectedProgramID
+        face = state.face
         endGeometryEdit()
         if workspaces == original.workspaces && programs == original.programs
             && lastWorkspace == original.lastWorkspace && startAtLogin == original.startAtLogin
-            && shortcuts == original.shortcuts {
+            && shortcuts == original.shortcuts && desktopSetups == original.desktopSetups {
             persistenceWork?.cancel()
             dirty = false
             saved = false
@@ -186,6 +206,7 @@ public final class SettingsModel {
         original = config
         workspaces = config.workspaces
         programs = config.programs
+        desktopSetups = config.desktopSetups
         lastWorkspace = config.lastWorkspace
         startAtLogin = config.startAtLogin
         shortcuts = config.shortcuts
@@ -197,11 +218,12 @@ public final class SettingsModel {
         selectedZoneID = first?.zones.first?.id
         face = first == nil ? nil : .zone
         selectedProgramID = config.programs.first?.id
+        reconcileDesktops()
     }
 
     public var config: SlotterConfig {
         SlotterConfig(workspaces: workspaces, programs: programs, lastWorkspace: lastWorkspace,
-                      startAtLogin: startAtLogin, shortcuts: shortcuts)
+                      startAtLogin: startAtLogin, shortcuts: shortcuts, desktopSetups: desktopSetups)
     }
 
     // MARK: - Lookup
@@ -451,6 +473,7 @@ public final class SettingsModel {
         clearLayoutHistory()
         workspaces = original.workspaces
         programs = original.programs
+        desktopSetups = original.desktopSetups
         lastWorkspace = original.lastWorkspace
         startAtLogin = original.startAtLogin
         shortcuts = original.shortcuts
@@ -712,22 +735,25 @@ public final class SettingsModel {
         guard let workspaceIndex = selectedWorkspaceIndex else { return }
         let reference = monitor.reference
         let plate = VirtualPlate(name: desktop.label, monitor: reference, desktopID: desktop.uuid)
-        let copies = workspaces[workspaceIndex].zones.filter {
-            $0.plateID == nil && monitorKey($0) == monitor.id
-        }.map { source -> Zone in
-            var copy = source
-            copy.id = UUID()
-            copy.plateID = plate.id
-            return copy
-        }
         recordLayout()
         workspaces[workspaceIndex].virtualPlates.append(plate)
-        workspaces[workspaceIndex].zones.append(contentsOf: copies)
         selectedVirtualPlateID = plate.id
-        selectedZoneID = copies.first?.id
+        selectedZoneID = nil
+        face = .settings
         selectedVirtualMonitorID = nil
         showingVirtualChoices = false
         touch()
+    }
+
+    public func useVirtualMonitor(_ plateID: UUID) {
+        guard let workspaceIndex = selectedWorkspaceIndex,
+              let plate = workspaces[workspaceIndex].virtualPlates.first(where: { $0.id == plateID }),
+              !workspaces[workspaceIndex].zones.contains(where: { $0.plateID == plateID }) else { return }
+        let zone = Zone(monitor: plate.monitor, x: 0, y: 0, w: 100, h: 100, plateID: plateID)
+        mutateWorkspace { $0.zones.append(zone) }
+        selectedVirtualPlateID = plateID
+        selectedZoneID = zone.id
+        face = .zone
     }
 
     public func benchVirtualPlate(_ id: UUID) {
@@ -739,13 +765,30 @@ public final class SettingsModel {
         touch()
     }
 
+    private func reconcileDesktops() {
+        var changed = false
+        for index in workspaces.indices {
+            if workspaces[index].reconcileDesktops(status.spaceSnapshot) { changed = true }
+        }
+        if changed {
+            if let id = selectedVirtualPlateID,
+               selectedWorkspace?.virtualPlates.first(where: { $0.id == id })?.desktopID == nil {
+                selectedVirtualPlateID = nil
+                selectedZoneID = selectedWorkspace?.zones.first(where: { $0.plateID == nil })?.id
+            }
+            touch()
+        }
+    }
+
     public func renameVirtualPlate(_ id: UUID, to raw: String) {
         guard let workspaceIndex = selectedWorkspaceIndex,
               let index = workspaces[workspaceIndex].virtualPlates.firstIndex(where: { $0.id == id }) else { return }
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, workspaces[workspaceIndex].virtualPlates[index].name != name else { return }
+        guard !name.isEmpty, workspaces[workspaceIndex].virtualPlates[index].name != name
+                || workspaces[workspaceIndex].virtualPlates[index].followsDesktopName else { return }
         recordLayout()
         workspaces[workspaceIndex].virtualPlates[index].name = name
+        workspaces[workspaceIndex].virtualPlates[index].followsDesktopName = false
         touch()
     }
 
@@ -758,6 +801,10 @@ public final class SettingsModel {
             self.recordLayout()
             self.workspaces[workspaceIndex].virtualPlates.removeAll { $0.id == id }
             self.workspaces[workspaceIndex].zones.removeAll { $0.plateID == id }
+            if self.selectedZone == nil {
+                self.selectedZoneID = self.selectedWorkspace?.zones.first?.id
+                self.selectedVirtualPlateID = self.selectedZone?.plateID
+            }
             if self.selectedVirtualPlateID == id { self.selectedVirtualPlateID = nil }
             if self.selectedBenchedPlateID == id { self.selectedBenchedPlateID = nil }
             self.touch()
@@ -772,6 +819,82 @@ public final class SettingsModel {
         }
     }
 
+    public func desktopOrdinal(_ id: String?) -> Int {
+        guard let id else { return 0 }
+        let spaces = status.spaceSnapshot.displays.flatMap(\.spaces).filter { !$0.isFullscreen }
+        return spaces.first(where: { $0.uuid == id })?.ordinal ?? 0
+    }
+
+    public func desktopDescription(_ plate: VirtualPlate) -> String {
+        let ordinal = desktopOrdinal(plate.desktopID)
+        return ordinal > 0 ? "macOS Desktop \(ordinal)" : plate.desktopID == nil ? "Bench" : "Desktop unavailable"
+    }
+
+    public func showDesktop(_ plate: VirtualPlate) {
+        desktopSwitchMessage = DesktopSwitcher.show(plate)
+        guard desktopSwitchMessage == nil, let id = plate.desktopID else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            let snapshot = SpaceRegistry.shared.snapshot()
+            guard let self else { return }
+            self.status.spaceSnapshot = snapshot
+            if !snapshot.displays.contains(where: { $0.currentSpaceUUID == id }) {
+                self.desktopSwitchMessage = "macOS did not switch desktops. Check the Mission Control shortcut for this desktop and try again."
+            }
+        }
+    }
+
+    public func saveDesktopSetup(_ plateID: UUID, name raw: String) -> String? {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 48,
+              name.rangeOfCharacter(from: CharacterSet(charactersIn: "[]=,").union(.controlCharacters)) == nil else {
+            return "Use a name of 1–48 characters without [ ] = , or line breaks."
+        }
+        guard !desktopSetups.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else {
+            return "A setup with that name already exists. Choose another name."
+        }
+        guard let workspace = selectedWorkspace else { return "Select a virtual plate first." }
+        let zones = workspace.zones.filter { $0.plateID == plateID }
+        guard !zones.isEmpty else { return "Set up zones on this plate before saving a setup." }
+        guard zones.allSatisfy({ fault(of: $0) == nil }) else { return "Fix this plate’s zone measurements before saving a setup." }
+        desktopSetups.append(DesktopSetup(name: name, zones: zones.map {
+            Zone(monitor: MonitorRef(ordinal: 1), x: $0.x, y: $0.y, w: $0.w, h: $0.h, program: $0.program).clamped()
+        }))
+        touch()
+        return nil
+    }
+
+    public func loadDesktopSetup(_ setup: DesktopSetup, onto plateID: UUID) {
+        guard let index = selectedWorkspaceIndex,
+              let plate = workspaces[index].virtualPlates.first(where: { $0.id == plateID }) else { return }
+        recordLayout()
+        let zones = setup.zones.map {
+            Zone(monitor: plate.monitor, x: $0.x, y: $0.y, w: $0.w, h: $0.h,
+                 program: $0.program.flatMap { name in programs.contains { $0.name.caseInsensitiveCompare(name) == .orderedSame } ? name : nil }, plateID: plateID)
+        }
+        workspaces[index].zones.removeAll { $0.plateID == plateID }
+        workspaces[index].zones.append(contentsOf: zones)
+        selectedVirtualPlateID = plateID
+        selectedZoneID = zones.first?.id
+        face = .zone
+        touch()
+    }
+
+    public func pinnedVirtualPlates(in workspace: Workspace) -> [VirtualPlate] {
+        workspace.virtualPlates.enumerated().filter { $0.element.desktopID != nil }.sorted {
+            let left = desktopOrdinal($0.element.desktopID)
+            let right = desktopOrdinal($1.element.desktopID)
+            let a = left > 0 ? left : Int.max
+            let b = right > 0 ? right : Int.max
+            return a == b ? $0.offset < $1.offset : a < b
+        }.map(\.element)
+    }
+
+    public func virtualPlateName(_ plate: VirtualPlate) -> String {
+        guard plate.desktopID != nil, plate.followsDesktopName else { return plate.name }
+        let ordinal = desktopOrdinal(plate.desktopID)
+        return ordinal > 0 ? "Desktop \(ordinal)" : "Saved \(plate.name)"
+    }
+
     public func pinVirtualPlate(_ id: UUID, to desktop: ManagedSpace) {
         guard let workspaceIndex = selectedWorkspaceIndex,
               let index = workspaces[workspaceIndex].virtualPlates.firstIndex(where: { $0.id == id }) else { return }
@@ -782,6 +905,10 @@ public final class SettingsModel {
         }) else { return }
         recordLayout()
         workspaces[workspaceIndex].virtualPlates[index].desktopID = desktop.uuid
+        workspaces[workspaceIndex].virtualPlates[index].closedDesktopLabel = nil
+        if workspaces[workspaceIndex].virtualPlates[index].followsDesktopName {
+            workspaces[workspaceIndex].virtualPlates[index].name = desktop.label
+        }
         touch()
     }
 
@@ -842,6 +969,12 @@ public final class SettingsModel {
         guard name != old else { return nil }
         programs[index].name = name
         updateHistoryProgram(programs[index], replacing: old)
+        for setup in desktopSetups.indices {
+            for zone in desktopSetups[setup].zones.indices
+            where desktopSetups[setup].zones[zone].program?.caseInsensitiveCompare(old) == .orderedSame {
+                desktopSetups[setup].zones[zone].program = name
+            }
+        }
         for w in workspaces.indices {
             for z in workspaces[w].zones.indices
             where workspaces[w].zones[z].program?.caseInsensitiveCompare(old) == .orderedSame {

@@ -8,9 +8,8 @@ BUNDLE_ID="uk.co.kalkman.slotter"
 APP="build/Slotter.app"
 INSTALL_PATH="/Applications/Slotter.app"
 OLD_APP="/Applications/Snappy.app"
-VERSION="$(tr -d '[:space:]' < ../VERSION)"
-SHORT_VERSION="${VERSION%%-*}"
-BUILD_NUMBER="$(git -C .. rev-list --count HEAD)"
+VERSION="${SLOTTER_VERSION:-$(tr -d '[:space:]' < ../VERSION)}"
+BUILD_NUMBER="${SLOTTER_BUILD:-$(git -C .. rev-list --count HEAD)}"
 
 INSTALL=0
 for arg in "$@"; do
@@ -29,12 +28,14 @@ swift build -c release --product slotter-icongen
 BIN="$(swift build -c release --show-bin-path)"
 
 echo "==> assemble"
-rm -rf "$APP" build/Slotter.iconset
+rm -rf "${APP:?}" build/Slotter.iconset
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN/Slotter" "$APP/Contents/MacOS/Slotter"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $SHORT_VERSION" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
+[ -z "${SLOTTER_PUBLIC_KEY:-}" ] || plutil -replace SUPublicEDKey -string "$SLOTTER_PUBLIC_KEY" "$APP/Contents/Info.plist"
+[ -z "${SLOTTER_FEED_URL:-}" ] || plutil -replace SUFeedURL -string "$SLOTTER_FEED_URL" "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 echo "==> fonts"
@@ -51,11 +52,7 @@ if ! security find-identity -v -p codesigning | grep -qF "$IDENTITY"; then
     echo "ad-hoc signing is deliberately not offered — it drops the Accessibility grant on every rebuild." >&2
     exit 1
 fi
-codesign --force --sign "$IDENTITY" \
-         --identifier "$BUNDLE_ID" \
-         --entitlements Slotter.entitlements \
-         "$APP"
-codesign --verify --strict "$APP"
+bash scripts/package-sparkle.sh "$APP" "$IDENTITY" Slotter.entitlements
 codesign -dvv "$APP" 2>&1 | grep -E '^(Identifier|Authority|TeamIdentifier)' || true
 
 if [ "$INSTALL" -eq 1 ]; then
@@ -67,7 +64,7 @@ if [ "$INSTALL" -eq 1 ]; then
 
     osascript -e 'quit app "Slotter"' >/dev/null 2>&1 || pkill -x Slotter || true
     sleep 1
-    rm -rf "$INSTALL_PATH"
+    rm -rf "${INSTALL_PATH:?}"
     ditto "$APP" "$INSTALL_PATH"
     # Nothing built stays in the repo: Spotlight would list the staged copy beside the real one.
     rm -rf build
@@ -76,7 +73,7 @@ if [ "$INSTALL" -eq 1 ]; then
     if [ -d "$OLD_APP" ]; then
         osascript -e 'quit app "Snappy"' >/dev/null 2>&1 || pkill -x Snappy || true
         sleep 1
-        rm -rf "$OLD_APP"
+        rm -rf "${OLD_APP:?}"
         echo "removed $OLD_APP"
     fi
 

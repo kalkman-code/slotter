@@ -14,7 +14,11 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var resolvedWorkspacesByDisplay: [String: Workspace] = [:]
     private var loggedSpaceUUIDs: [String: String]?
     private var spaceRefreshGeneration = 0
+    private var launchTask: Task<Void, Never>?
     private let openSettingsAtLaunch: Bool
+    private let updates = UpdateController()
+
+    @objc func checkForUpdates(_ sender: Any?) { updates.checkNow() }
 
     @objc func undoLayout(_ sender: Any?) {
         if let text = NSApp.keyWindow?.firstResponder as? NSTextView {
@@ -61,9 +65,12 @@ final class AppController: NSObject, NSApplicationDelegate {
             closeAll: { [weak self] in self?.closeAll() },
             forceQuitAll: { [weak self] in self?.forceQuitAll() },
             grantAccessibility: { [weak self] in self?.grantAccessibility() },
-            quit: { NSApp.terminate(nil) }))
+            quit: { NSApp.terminate(nil) },
+            checkForUpdates: { [weak self] in self?.updates.checkNow() }))
         controller.install()
         menuController = controller
+        updates.onChange = { [weak self] in self?.refreshMenuState() }
+        updates.start()
 
         SnapEngine.onFeedback = { title, body, success in
             ToastPresenter.shared.show(ToastContent(title: title, body: body, success: success))
@@ -122,7 +129,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             self, selector: #selector(openSettingsRequested),
             name: openSettingsNotification, object: nil)
 
-        Log.write("launched, bundle=\(bundleIdentifier), trusted=\(AX.isTrusted)")
+        Log.write("launched, bundle=\(bundleIdentifier), version=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? "unknown"), build=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") ?? "unknown"), trusted=\(AX.isTrusted)")
         Log.write("config: \(config.workspaces.count) workspaces, \(config.programs.count) programs, "
             + "last=\(config.lastWorkspace)")
         logDisplays()
@@ -136,6 +143,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        cancelLaunch()
         SettingsWindowController.shared.flushBeforeTermination()
         dragService?.stop()
         ShortcutCenter.shared.unregisterAll()
@@ -146,6 +154,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func screenParametersChanged() {
+        cancelLaunch()
         let snapshot = DisplayRegistry.refresh()
         settleSpaceResolution()
         FrameHistory.shared.clampToDisplays(snapshot)
@@ -161,6 +170,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func spaceDidChange() {
+        cancelLaunch()
         dragService?.cancel()
         settleSpaceResolution()
     }
@@ -206,6 +216,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         menuController?.config = config
         menuController?.activeWorkspace = activeWorkspace ?? ""
         menuController?.shortcutRegistrations = registrations
+        menuController?.canCheckForUpdates = updates.canCheck
         SettingsWindowController.shared.update(status: designerStatus)
     }
 
@@ -215,12 +226,19 @@ final class AppController: NSObject, NSApplicationDelegate {
                              shortcutFailures: registrations.filter { !$0.succeeded }.count,
                              loginNeedsApproval: LoginItem.state == .requiresApproval,
                              unavailableShortcuts: registrations.filter { !$0.succeeded }.map { $0.action.rawValue },
-                             spaceSnapshot: currentSpaceSnapshot)
+                             spaceSnapshot: currentSpaceSnapshot,
+                             automaticUpdates: updates.automaticallyChecks,
+                             canCheckForUpdates: updates.canCheck)
     }
 
     private func refreshSpaceResolution() {
         let manual = config.workspace(named: activeWorkspace ?? config.lastWorkspace)
         let result = VirtualPlateResolver().resolve(manualWorkspace: manual, workspaces: config.workspaces)
+        var changed = false
+        for index in config.workspaces.indices {
+            if config.workspaces[index].reconcileDesktops(result.snapshot) { changed = true }
+        }
+        if changed { ConfigStore.shared.save(config) }
         currentSpaceSnapshot = result.snapshot
         resolvedWorkspacesByDisplay = result.workspacesByDisplay
     }
@@ -253,10 +271,14 @@ final class AppController: NSObject, NSApplicationDelegate {
         for display in current.displays {
             guard let space = display.currentSpace,
                   let old = previous[display.displayUUID], old != space.uuid else { continue }
-            let plate = config.workspaces.lazy.compactMap { workspace in
-                workspace.virtualPlates.first(where: { $0.desktopID == space.uuid && $0.monitor.uuid == display.displayUUID })
+            let plate = manual.flatMap { workspace in
+                workspace.virtualPlates.first(where: { plate in
+                    let uuid = DisplayRegistry.resolve(plate.monitor)?.uuid ?? plate.monitor.uuid
+                    return !space.isFullscreen && plate.desktopID == space.uuid
+                        && uuid?.caseInsensitiveCompare(display.displayUUID) == .orderedSame
+                })
                     .map { (workspace, $0) }
-            }.first
+            }
             if let (workspace, plate) = plate {
                 Log.write("desktop changed: \(space.label) on \(display.displayName) uuid=\(space.uuid); virtual plate \(plate.name) in \(workspace.name)")
             } else {
@@ -266,6 +288,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func clearActiveZones() {
+        cancelLaunch()
         guard let name = activeWorkspace else { return }
         activeWorkspace = nil
         manualSelectionCleared = true
@@ -305,21 +328,26 @@ final class AppController: NSObject, NSApplicationDelegate {
         refreshSpaceResolution()
         refreshMenuState()
 
-        let assigned = workspace.zones.filter { !($0.program ?? "").isEmpty }.count
-        if workspace.zones.isEmpty {
+        let plan = VirtualPlateResolver().workspaceForLaunch(workspace)
+        let assigned = plan.zones.filter { !($0.program ?? "").isEmpty }.count
+        if plan.zones.isEmpty {
             toast("\(workspace.name) has no zones", "Open Settings and choose a layout preset.", success: false)
             return
         }
         if assigned == 0 {
             toast("\(workspace.name) is ready",
-                  "\(workspace.zones.count) manual snap zones are active.", success: true)
+                  "\(plan.zones.count) manual snap zones are active.", success: true)
             return
         }
 
         toast("Launching \(workspace.name)", "Opening and placing \(assigned) apps…", success: true)
 
-        Task {
-            guard let result = await WorkspaceLauncher.shared.activate(workspace, programs: config.programs) else { return }
+        launchTask = Task {
+            guard let result = await WorkspaceLauncher.shared.activate(plan, programs: config.programs) else { return }
+            if result.cancelled {
+                toast("Launch stopped", "The desktop or display changed. Launch the workspace again on this desktop.", success: false)
+                return
+            }
             let placed = "\(result.placed) of \(result.planned) apps placed."
             if result.placed == result.planned && result.firstError == nil {
                 toast("\(workspace.name) launched.", placed, success: true)
@@ -328,6 +356,11 @@ final class AppController: NSObject, NSApplicationDelegate {
                                                         problem: result.firstError ?? ""))
             }
         }
+    }
+
+    private func cancelLaunch() {
+        launchTask?.cancel()
+        WorkspaceLauncher.shared.cancel()
     }
 
     private func setLoginItem(_ enabled: Bool) {
@@ -371,6 +404,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func openSettings(openPrograms: Bool = false) {
+        refreshSpaceResolution()
         NSApp.activate()
         let actions = SettingsModel.Actions(
             save: { [weak self] updated in self?.store(updated) },
@@ -379,7 +413,9 @@ final class AppController: NSObject, NSApplicationDelegate {
                 AX.requestTrust()
                 AX.openAccessibilitySettings()
             },
-            openLoginItemsSettings: { LoginItem.openLoginItemsSettings() })
+            openLoginItemsSettings: { LoginItem.openLoginItemsSettings() },
+            setAutomaticUpdates: { [weak self] in self?.updates.automaticallyChecks = $0 },
+            checkForUpdates: { [weak self] in self?.updates.checkNow() })
         SettingsWindowController.shared.show(config: config, status: designerStatus,
                                              openPrograms: openPrograms, actions: actions)
     }
@@ -413,6 +449,7 @@ final class AppController: NSObject, NSApplicationDelegate {
 
 extension AppController: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(checkForUpdates(_:)) { return updates.canCheck }
         if menuItem.action == #selector(undoLayout(_:)) {
             if let text = NSApp.keyWindow?.firstResponder as? NSTextView { return text.undoManager?.canUndo ?? false }
             return SettingsWindowController.shared.canUndoLayout

@@ -23,6 +23,16 @@ namespace Slotter
         {
             return new Zone { Name = Name, Mon = Mon, MonKey = MonKey, X = X, Y = Y, W = W, H = H, Prog = Prog, PlateId = PlateId };
         }
+
+        public Zone Clamped()
+        {
+            var zone = Clone();
+            zone.X = Config.Clamp(double.IsFinite(X) ? X : 0, 0, 99);
+            zone.Y = Config.Clamp(double.IsFinite(Y) ? Y : 0, 0, 99);
+            zone.W = Config.Clamp(double.IsFinite(W) ? W : 0, 1, 100 - zone.X);
+            zone.H = Config.Clamp(double.IsFinite(H) ? H : 0, 1, 100 - zone.Y);
+            return zone;
+        }
     }
 
     // A reusable named program in the [Programs] library.
@@ -62,15 +72,25 @@ namespace Slotter
         public string MonKey;
         public int Mon;
         public string DesktopId;
+        public bool? AutoName;
+        public string ClosedDesktopLabel;
+        public bool FollowsDesktopName { get { return AutoName ?? System.Text.RegularExpressions.Regex.IsMatch(Name ?? "", @"^Desktop [1-9][0-9]*$"); } }
 
         public VirtualPlate Clone() { return (VirtualPlate)MemberwiseClone(); }
         public bool Benched { get { return string.IsNullOrEmpty(DesktopId); } }
+    }
+
+    public sealed class DesktopSetup
+    {
+        public string Name;
+        public List<Zone> Zones = new List<Zone>();
     }
 
     public class LaunchResult
     {
         public int Planned, Placed;
         public string FirstError;
+        public bool Cancelled;
     }
 
     // profiles.ini read/write and the domain queries every window needs. Carried over
@@ -78,6 +98,76 @@ namespace Slotter
     // rewrite of what Slotter does.
     public static class Config
     {
+        public static List<DesktopSetup> ReadDesktopSetups()
+        {
+            var result = new List<DesktopSetup>();
+            int count;
+            int.TryParse(IniRead("DesktopSetups", "Count", "0"), out count);
+            for (int n = 1; n <= Math.Min(1000, count); n++)
+            {
+                var setup = new DesktopSetup { Name = IniRead("DesktopSetups", "Name" + n, "") };
+                int zones;
+                int.TryParse(IniRead("DesktopSetups", "ZoneCount" + n, "0"), out zones);
+                for (int i = 1; i <= Math.Min(400, zones); i++)
+                {
+                    string key = n + "_" + i;
+                    string[] parts = IniRead("DesktopSetups", "Zone" + key, "").Split(',');
+                    double x, y, w, h;
+                    if (parts.Length != 4 || !double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out x)
+                        || !double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out y)
+                        || !double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out w)
+                        || !double.TryParse(parts[3], NumberStyles.Float, CultureInfo.InvariantCulture, out h)
+                        || !double.IsFinite(x) || !double.IsFinite(y) || !double.IsFinite(w) || !double.IsFinite(h)
+                        || x < 0 || y < 0 || w < 1 || h < 1 || x + w > 100.05 || y + h > 100.05) continue;
+                    setup.Zones.Add(new Zone { Mon = 1, X = x, Y = y, W = w, H = h, Prog = IniRead("DesktopSetups", "Program" + key, "") }.Clamped());
+                }
+                if (!string.IsNullOrEmpty(setup.Name) && setup.Zones.Count > 0) result.Add(setup);
+            }
+            return result;
+        }
+
+        public static bool WriteDesktopSetups(List<DesktopSetup> setups)
+        {
+            bool ok = true;
+            for (int index = 0; index < setups.Count; index++)
+            {
+                int n = index + 1;
+                DesktopSetup setup = setups[index];
+                ok &= IniWrite("DesktopSetups", "Name" + n, setup.Name);
+                ok &= IniWrite("DesktopSetups", "ZoneCount" + n, setup.Zones.Count.ToString(CultureInfo.InvariantCulture));
+                for (int i = 0; i < setup.Zones.Count; i++)
+                {
+                    Zone zone = setup.Zones[i].Clamped();
+                    string key = n + "_" + (i + 1);
+                    ok &= IniWrite("DesktopSetups", "Zone" + key, string.Join(",", new[] { zone.X, zone.Y, zone.W, zone.H }.Select(v => v.ToString(CultureInfo.InvariantCulture))));
+                    ok &= IniWrite("DesktopSetups", "Program" + key, zone.Prog ?? "");
+                }
+            }
+            return ok && IniWrite("DesktopSetups", "Count", setups.Count.ToString(CultureInfo.InvariantCulture));
+        }
+
+        public static bool ReconcileDesktops(Profile profile, DesktopSnapshot snapshot)
+        {
+            if (snapshot == null || !snapshot.Available) return false;
+            bool changed = false;
+            foreach (VirtualPlate plate in profile.VirtualPlates)
+            {
+                if (plate.Benched) continue;
+                int index = snapshot.Desktops.FindIndex(d => d.Id.ToString().Equals(plate.DesktopId, StringComparison.OrdinalIgnoreCase));
+                if (index < 0)
+                {
+                    plate.ClosedDesktopLabel = plate.Name;
+                    plate.DesktopId = "";
+                    changed = true;
+                }
+                else if (plate.FollowsDesktopName && plate.Name != "Desktop " + (index + 1))
+                {
+                    plate.Name = "Desktop " + (index + 1);
+                    changed = true;
+                }
+            }
+            return changed;
+        }
         [DllImport("kernel32", CharSet = CharSet.Unicode)]
         static extern int GetPrivateProfileString(string section, string key, string def, StringBuilder ret, int size, string path);
         [DllImport("kernel32", CharSet = CharSet.Unicode)]
@@ -183,7 +273,9 @@ namespace Slotter
                             Id = parsed.ToString(), Name = IniRead(name, "VirtualPlateName" + i, "Desktop").Trim(),
                             Mon = int.TryParse(IniRead(name, "VirtualPlateMonitor" + i, "1"), out plateMon) ? plateMon : 1,
                             MonKey = IniRead(name, "VirtualPlateMonKey" + i, "").Trim(),
-                            DesktopId = IniRead(name, "VirtualPlateDesktop" + i, "").Trim()
+                            DesktopId = IniRead(name, "VirtualPlateDesktop" + i, "").Trim(),
+                            AutoName = IniRead(name, "VirtualPlateAutoName" + i, "") == "" ? (bool?)null : IniRead(name, "VirtualPlateAutoName" + i, "0") == "1",
+                            ClosedDesktopLabel = IniRead(name, "VirtualPlateClosedDesktop" + i, "")
                         });
                     }
                 }
@@ -252,6 +344,8 @@ namespace Slotter
                         ok &= IniWrite(p.Name, "VirtualPlateMonitor" + (i + 1), plate.Mon.ToString(CultureInfo.InvariantCulture));
                         ok &= IniWrite(p.Name, "VirtualPlateMonKey" + (i + 1), plate.MonKey ?? "");
                         ok &= IniWrite(p.Name, "VirtualPlateDesktop" + (i + 1), plate.DesktopId ?? "");
+                        ok &= IniWrite(p.Name, "VirtualPlateAutoName" + (i + 1), plate.FollowsDesktopName ? "1" : "0");
+                        ok &= IniWrite(p.Name, "VirtualPlateClosedDesktop" + (i + 1), plate.ClosedDesktopLabel ?? "");
                     }
                 }
                 return ok;
@@ -267,6 +361,7 @@ namespace Slotter
             try
             {
                 int n; int.TryParse(IniRead("Programs", "Count", "0"), out n);
+                n = Math.Min(n, File.ReadLines(IniPath).Count());
                 for (int i = 1; i <= n; i++)
                 {
                     string name = IniRead("Programs", "Name" + i, "");

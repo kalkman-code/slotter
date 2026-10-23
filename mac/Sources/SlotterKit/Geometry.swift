@@ -64,6 +64,13 @@ public enum Geo {
                      height: size.height), into: outer)
     }
 
+    public static func windowOrigin(_ proposed: CGPoint, actualSize: CGSize, zone: CGRect, workArea: CGRect) -> CGPoint {
+        let horizontal = actualSize.width > zone.width ? workArea : zone
+        let vertical = actualSize.height > zone.height ? workArea : zone
+        return CGPoint(x: min(max(proposed.x, horizontal.minX), max(horizontal.minX, horizontal.maxX - actualSize.width)),
+                       y: min(max(proposed.y, vertical.minY), max(vertical.minY, vertical.maxY - actualSize.height)))
+    }
+
     public static func slice(_ outer: CGRect, columns: Int, index: Int, span: Int = 1) -> CGRect {
         let start = (outer.width * CGFloat(index) / CGFloat(columns)).rounded()
         let end = (outer.width * CGFloat(index + span) / CGFloat(columns)).rounded()

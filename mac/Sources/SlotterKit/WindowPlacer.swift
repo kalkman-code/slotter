@@ -11,6 +11,8 @@ public enum WindowPlacer {
         case fullScreenTimeout
         case gone
         case retryable(Int32)
+        case desktopChanged
+        case restoreFailed
     }
 
     public struct Outcome: Sendable {
@@ -52,8 +54,8 @@ public enum WindowPlacer {
     @discardableResult
     public static func prepare(_ window: AXElement) -> Failure? {
         if AX.bool(kAXMinimizedAttribute, of: window) == true {
-            AX.setBool(kAXMinimizedAttribute, false, on: window)
-            _ = waitUntil(timeout: 0.5) { AX.bool(kAXMinimizedAttribute, of: window) != true }
+            guard AX.setBool(kAXMinimizedAttribute, false, on: window) == .success,
+                  waitUntil(timeout: 0.5, condition: { AX.bool(kAXMinimizedAttribute, of: window) == false }) else { return .restoreFailed }
         }
 
         if isFullScreen(window) {
@@ -66,35 +68,45 @@ public enum WindowPlacer {
         return nil
     }
 
-    public static func place(_ window: AXElement, into target: CGRect, tolerance: CGFloat = 2) -> Outcome {
+    public static func place(_ window: AXElement, into target: CGRect, tolerance: CGFloat = 2,
+                             validation: (@Sendable () -> Bool)? = nil) -> Outcome {
+        guard validation?() != false else { return .failed(.desktopChanged) }
         guard AX.isTrusted else { return .failed(.notTrusted) }
 
         if let failure = prepare(window) { return .failed(failure) }
+        guard validation?() != false else { return .failed(.desktopChanged) }
 
         guard AX.frame(of: window) != nil else { return .failed(.gone) }
         guard AX.isSettable(kAXPositionAttribute, on: window) else { return .failed(.positionNotSettable) }
 
         let wanted = Geo.integral(target)
+        let workArea = DisplayRegistry.current.display(bestFor: wanted)?.workAreaAX ?? wanted
         let sizeSettable = AX.isSettable(kAXSizeAttribute, on: window)
 
         if !sizeSettable {
             guard let current = AX.frame(of: window) else { return .failed(.gone) }
-            let centred = Geo.centre(current.size, in: wanted)
-            let error = AX.setPosition(centred.origin, on: window)
+            let centred = Geo.windowOrigin(CGPoint(x: wanted.midX - current.width / 2, y: wanted.midY - current.height / 2),
+                                           actualSize: current.size, zone: wanted, workArea: workArea)
+            guard validation?() != false else { return .failed(.desktopChanged) }
+            let error = AX.setPosition(centred, on: window)
             if let failure = classify(error) { return .failed(failure) }
             let landed = AX.frame(of: window)
             return Outcome(applied: landed, failure: nil, isExact: false, centredOnly: true)
         }
 
+        guard validation?() != false else { return .failed(.desktopChanged) }
         if let failure = classify(AX.setPosition(wanted.origin, on: window)) { return .failed(failure) }
+        guard validation?() != false else { return .failed(.desktopChanged) }
         if let failure = classify(AX.setSize(wanted.size, on: window)) { return .failed(failure) }
+        guard validation?() != false else { return .failed(.desktopChanged) }
         if let failure = classify(AX.setPosition(wanted.origin, on: window)) { return .failed(failure) }
 
         guard var landed = AX.frame(of: window) else { return .failed(.gone) }
         var requestedOrigin = wanted.origin
 
         if !Geo.matches(landed, wanted, tolerance: tolerance) {
-            requestedOrigin = Geo.clamp(CGRect(origin: wanted.origin, size: landed.size), into: wanted).origin
+            requestedOrigin = Geo.windowOrigin(wanted.origin, actualSize: landed.size, zone: wanted, workArea: workArea)
+            guard validation?() != false else { return .failed(.desktopChanged) }
             if let failure = classify(AX.setPosition(requestedOrigin, on: window)) { return .failed(failure) }
             guard let second = AX.frame(of: window) else { return .failed(.gone) }
             landed = second

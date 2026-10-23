@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Darwin
 
 public struct AXElement: Hashable, @unchecked Sendable {
     public let ref: AXUIElement
@@ -11,6 +12,23 @@ public struct AXElement: Hashable, @unchecked Sendable {
 }
 
 public enum AX {
+    private final class CancellationState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+    }
+
     public static let queue = DispatchQueue(label: "uk.co.kalkman.slotter.ax", qos: .userInitiated)
 
     public static let messagingTimeout: Float = 0.25
@@ -34,6 +52,19 @@ public enum AX {
         }
     }
 
+    public static func perform<T: Sendable>(cancelledValue: T, _ body: @escaping @Sendable () -> T) async -> T {
+        let state = CancellationState()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                queue.async {
+                    continuation.resume(returning: state.isCancelled ? cancelledValue : body())
+                }
+            }
+        } onCancel: {
+            state.cancel()
+        }
+    }
+
     public static func application(pid: pid_t) -> AXElement {
         let element = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(element, messagingTimeout)
@@ -47,8 +78,20 @@ public enum AX {
     }
 
     public static func element(at point: CGPoint) -> AXElement? {
+        element(at: point, copyElementAtPosition: AXUIElementCopyElementAtPosition)
+    }
+
+    static func element(at point: CGPoint,
+                        copyElementAtPosition: @Sendable (AXUIElement, Float, Float, UnsafeMutablePointer<AXUIElement?>) -> AXError) -> AXElement? {
+        // A system-wide hit-test can enter our own AppKit view tree in-process,
+        // before the caller can inspect its PID. That work must run on the main thread.
+        if !Thread.isMainThread {
+            return DispatchQueue.main.sync {
+                element(at: point, copyElementAtPosition: copyElementAtPosition)
+            }
+        }
         var found: AXUIElement?
-        let status = AXUIElementCopyElementAtPosition(systemWide().ref, Float(point.x), Float(point.y), &found)
+        let status = copyElementAtPosition(systemWide().ref, Float(point.x), Float(point.y), &found)
         guard status == .success, let found else { return nil }
         AXUIElementSetMessagingTimeout(found, messagingTimeout)
         return AXElement(found)
@@ -91,6 +134,16 @@ public enum AX {
         var pid: pid_t = 0
         guard AXUIElementGetPid(element.ref, &pid) == .success else { return nil }
         return pid
+    }
+
+    public static func windowID(of element: AXElement) -> CGWindowID? {
+        typealias Lookup = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
+        guard let library = dlopen(nil, RTLD_LAZY) else { return nil }
+        defer { dlclose(library) }
+        guard let address = dlsym(library, "_AXUIElementGetWindow") else { return nil }
+        let lookup = unsafeBitCast(address, to: Lookup.self)
+        var id: CGWindowID = 0
+        return lookup(element.ref, &id) == .success && id != 0 ? id : nil
     }
 
     public static func point(_ attribute: String, of element: AXElement) -> CGPoint? {

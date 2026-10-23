@@ -23,6 +23,8 @@ namespace Slotter
         public event Func<List<Profile>, List<ProgItem>, string, bool, bool, Dictionary<SnapAction, KeyCombo>, bool, bool, Dictionary<string, string>, Dictionary<string, string>, bool> Saved;
         public event Action<string> WorkspaceSet;
         public event Action<bool> RecordingChanged;
+        public event Action CheckUpdates;
+        public event Action<bool> AutomaticUpdatesChanged;
 
         enum Mode { Wide, Medium, Stacked, Narrow }
 
@@ -74,7 +76,7 @@ namespace Slotter
         readonly Dictionary<ProgItem, string> pendingNames = new Dictionary<ProgItem, string>();
         Mode mode = Mode.Wide;
         bool modeSet, tabsOverflow;
-        sealed class GeometryState { public List<Zone> Zones; public int Selected; }
+        sealed class GeometryState { public List<Zone> Zones; public List<VirtualPlate> Plates; public int Selected; }
         readonly List<GeometryState> undo = new List<GeometryState>(), redo = new List<GeometryState>();
         Field editingPosition;
         bool pixels;
@@ -98,9 +100,11 @@ namespace Slotter
         MonitorInfo unusedMonitor;
         readonly List<Button> setupButtons = new List<Button>();
         readonly Border virtualStrip = new Border { HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(22, 0, 0, 12), MaxWidth = 760 };
+        readonly ScrollViewer virtualStripScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
         readonly StackPanel virtualStripContent = new StackPanel { Orientation = Orientation.Vertical };
-        readonly StackPanel virtualPlatesRow = new StackPanel { Orientation = Orientation.Horizontal };
+        readonly WrapPanel virtualPlatesRow = new WrapPanel();
         readonly WrapPanel virtualChoicesRow = new WrapPanel { Margin = new Thickness(0, 6, 0, 0), MaxWidth = 760 };
+        readonly Popup virtualChoicePopup = new Popup { StaysOpen = false, AllowsTransparency = true, Placement = PlacementMode.Relative };
         bool showingVirtualChoices;
         string pinningPlateId;
         string chosenMonitorKey;
@@ -134,6 +138,9 @@ namespace Slotter
         WrapPanel zActs, zPresets;
         StackPanel zCur;
         readonly List<Button> presetButtons = new List<Button>();
+        readonly List<Button> desktopShowButtons = new List<Button>();
+        readonly List<DesktopSetup> desktopSetups = Config.ReadDesktopSetups();
+        Popup desktopSetupsPopup;
 
         // Settings face
         ToggleButton startSw, hotSw, snapShortcutsSw, followDesktopSw;
@@ -141,6 +148,7 @@ namespace Slotter
         readonly DockPanel elevState = new DockPanel(), desktopStateLine = new DockPanel();
         StackPanel setCol1, setCol2, setCol3;
         readonly StackPanel shortcutRows = new StackPanel();
+        readonly ScrollViewer shortcutsScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, MaxHeight = 360 };
         readonly StackPanel desktopBindingsList = new StackPanel();
         FrameworkElement desktopFollowOffRow;
         StackPanel desktopBindingPanel;
@@ -187,6 +195,7 @@ namespace Slotter
             shortcutReady = new Dictionary<SnapAction, bool>(shortcutStates);
             this.followDesktop = followDesktop;
             desktopSnapshot = desktops;
+            bool reconciled = ReconcileWorkDesktops();
             desktopBindings = new Dictionary<string, string>(bindings, StringComparer.OrdinalIgnoreCase);
             elevated = Presence.IsElevated();
             Keep();
@@ -207,6 +216,7 @@ namespace Slotter
             root.SizeChanged += delegate { UpdateMode(); };
             root.LayoutUpdated += delegate { PlaceCallout(); };
             RenderAll();
+            if (reconciled) Touch();
         }
 
         public void RefreshDisplays() { RenderAll(); }
@@ -223,9 +233,18 @@ namespace Slotter
         public void DesktopState(DesktopSnapshot snapshot)
         {
             desktopSnapshot = snapshot;
+            if (ReconcileWorkDesktops()) Touch();
+            canvas.Refresh();
             SyncSettingsFace();
             SyncDesktopBinding();
             RenderVirtualStrip();
+        }
+
+        bool ReconcileWorkDesktops()
+        {
+            bool changed = false;
+            foreach (Profile profile in work) if (Config.ReconcileDesktops(profile, desktopSnapshot)) changed = true;
+            return changed;
         }
 
         public void ActiveWorkspaceChanged(string name)
@@ -293,14 +312,45 @@ namespace Slotter
             virtualStrip.Padding = new Thickness(7);
 
             canvas.ZoneClicked += delegate (Zone z) { editingPosition = null; sel = z; face = "zone"; RenderDrawer(); };
+            canvas.VirtualAddClicked += delegate
+            {
+                if (current == null || desktopSnapshot == null || !desktopSnapshot.Available) return;
+                pinningPlateId = null;
+                chosenMonitorKey = null;
+                showingVirtualChoices = true;
+                RenderVirtualStrip();
+            };
+            canvas.VirtualSetupClicked += UseVirtualPlate;
+            canvas.VirtualBenchClicked += delegate (VirtualPlate plate)
+            {
+                RememberGeometry();
+                plate.DesktopId = "";
+                Touch();
+                RenderAll();
+            };
+            canvas.VirtualRenameClicked += delegate (VirtualPlate plate)
+            {
+                sel = ZonesForPlate(plate).FirstOrDefault();
+                if (sel == null) return;
+                face = "zone";
+                RenderDrawer();
+                virtualNameField.Focus();
+                virtualNameField.SelectAll();
+            };
+            canvas.DesktopLabel = DesktopLabel;
+            canvas.DesktopOrdinal = DesktopOrdinal;
+            canvas.PlateName = VirtualPlateName;
             canvas.Laid += PlaceNotes;
             canvas.Fault = CanvasFault;
             desk.Children.Add(canvas);
             desk.Children.Add(notes);
             virtualStripContent.Children.Add(virtualPlatesRow);
-            virtualStripContent.Children.Add(virtualChoicesRow);
-            virtualStrip.Child = virtualStripContent;
+            virtualStripScroll.Content = virtualStripContent;
+            virtualStrip.Child = virtualStripScroll;
             desk.Children.Add(virtualStrip);
+            virtualChoicePopup.Child = new Border { Background = Ui.B("B.Drawer"), BorderBrush = Ui.B("B.Rule"), BorderThickness = new Thickness(1), Padding = new Thickness(10), Child = virtualChoicesRow };
+            desk.Children.Add(virtualChoicePopup);
+            desk.SizeChanged += delegate { UpdateVirtualStripLayout(); };
 
             title.FontFamily = Ui.DisplayFont;
             title.FontSize = Ui.D("T.Title");
@@ -410,8 +460,10 @@ namespace Slotter
                 if (syncing || current == null || sel == null || string.IsNullOrEmpty(sel.PlateId)) return;
                 VirtualPlate plate = FindVirtualPlate(sel.PlateId);
                 string name = virtualNameField.Text.Trim();
-                if (plate == null || name.Length == 0 || name.Length > 48) return;
+                if (plate == null || name.Length == 0 || name.Length > 48 || (name == plate.Name && !plate.FollowsDesktopName)) return;
+                RememberGeometry();
                 plate.Name = name;
+                plate.AutoName = false;
                 Touch();
                 canvas.Refresh();
                 RenderVirtualStrip();
@@ -576,6 +628,23 @@ namespace Slotter
             setCol1.Children.Add(setHead);
             setCol1.Children.Add(SettingRow(startText, startSw));
 
+            var updateText = new StackPanel();
+            updateText.Children.Add(Ui.Text("Automatic update checks", 13, FontWeights.Bold, "B.Ink"));
+            var updateDetail = Ui.Text("Checks at launch and daily. You choose when to install.", 12, FontWeights.Normal, "B.Ink2");
+            updateDetail.TextWrapping = TextWrapping.Wrap; updateText.Children.Add(updateDetail);
+            var updates = new ToggleButton { Style = Ui.S("Switch"), IsChecked = Config.IniRead("Settings", "AutomaticUpdateChecks", "1") != "0" };
+            AutomationProperties.SetName(updates, "Automatic update checks");
+            AutomationProperties.SetAutomationId(updates, "automatic-update-checks");
+            updates.Click += delegate
+            {
+                AutomaticUpdatesChanged?.Invoke(updates.IsChecked == true);
+                updates.IsChecked = Config.IniRead("Settings", "AutomaticUpdateChecks", "1") != "0";
+            };
+            setCol1.Children.Add(SettingRow(updateText, updates));
+            var checkUpdates = Ui.Button("Btn.Quiet", "Check for updates…", () => CheckUpdates?.Invoke(), "check-updates");
+            checkUpdates.HorizontalAlignment = HorizontalAlignment.Left;
+            setCol1.Children.Add(checkUpdates);
+
             setCol2 = new StackPanel();
             setCol3 = new StackPanel();
         }
@@ -607,10 +676,9 @@ namespace Slotter
             resetAllShortcuts.HorizontalAlignment = HorizontalAlignment.Left;
             content.Children.Add(resetAllShortcuts);
 
-            ScrollViewer scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, MaxHeight = 280 };
-            scroll.Content = shortcutRows;
-            content.Children.Add(scroll);
-            faceShortcuts.Child = content;
+            content.Children.Add(shortcutRows);
+            shortcutsScroll.Content = content;
+            faceShortcuts.Child = shortcutsScroll;
         }
 
         StackPanel BuildDesktopBindingPanel()
@@ -687,10 +755,13 @@ namespace Slotter
             sheetListBox.Child = sheetList;
 
             pfName = SheetField("prog-name");
+            AutomationProperties.SetName(pfName, "Program name");
             pfName.TextChanged += delegate { OnProgramName(); };
             pfPath = SheetField("prog-path");
+            AutomationProperties.SetName(pfPath, "Executable or app");
             pfPath.TextChanged += delegate { if (syncing || progSel == null) return; progSel.Exe = pfPath.Text.Trim(); Touch(); SyncProgramErrors(); canvas.Refresh(); };
             pfArgs = SheetField("prog-args");
+            AutomationProperties.SetName(pfArgs, "Arguments, optional");
             pfArgs.TextChanged += delegate { if (syncing || progSel == null) return; progSel.Args = pfArgs.Text.Trim(); Touch(); };
             pfNameErr = ErrorLine();
             pfPathErr = ErrorLine();
@@ -768,6 +839,7 @@ namespace Slotter
         {
             double w = root.ActualWidth;
             if (w <= 0) return;
+            shortcutsScroll.MaxHeight = Math.Min(360, Math.Max(160, root.ActualHeight - 360));
             Mode m = w < 760 ? Mode.Narrow : w < 860 ? Mode.Stacked : w < 1000 ? Mode.Medium : Mode.Wide;
             bool changed = !modeSet || m != mode;
             mode = m;
@@ -1182,7 +1254,7 @@ namespace Slotter
             title.Visibility = narrow ? Visibility.Collapsed : Visibility.Visible;
             meta.FontSize = narrow ? 12 : 13;
             meta.Foreground = Ui.B("B.Ink2");
-            List<MonitorInfo> online = monitors.Where(m => m.Online && current.Zones.Any(z => string.IsNullOrEmpty(z.PlateId) && Monitors.Holds(m, z))).ToList();
+            List<MonitorInfo> online = monitors.Where(m => m.Online && (current == null || current.Zones.Any(z => string.IsNullOrEmpty(z.PlateId) && Monitors.Holds(m, z)))).ToList();
             if (current == null)
             {
                 string found = "First run. " + CountWords(online.Count) + " found";
@@ -1277,21 +1349,61 @@ namespace Slotter
             }
             marginNote.Visibility = noteFits && shortcutReady.Values.Any(ready => !ready) ? Visibility.Visible : Visibility.Collapsed;
 
+            foreach (Button button in desktopShowButtons) notes.Children.Remove(button);
+            desktopShowButtons.Clear();
+            foreach (DeskCanvas.Placed placement in canvas.Placements.Where(p => p.VirtualPlate != null))
+            {
+                VirtualPlate captured = placement.VirtualPlate;
+                Button show = Ui.Button("Link", placement.Outer.Width < 180 ? "Show" : "Show desktop", delegate
+                {
+                    string error = VirtualDesktops.ShowDesktop(captured.DesktopId);
+                    if (error != null) Toast.Show("Show desktop", error, false);
+                }, "show-desktop-" + captured.Id);
+                show.FontSize = 10;
+                show.Padding = new Thickness(2, 1, 2, 1);
+                show.Width = Math.Max(1, placement.Outer.Width / 2);
+                show.Height = 22;
+                show.ToolTip = DesktopLabel(captured.DesktopId);
+                AutomationProperties.SetName(show, "Show " + DesktopLabel(captured.DesktopId));
+                notes.Children.Add(show);
+                Canvas.SetLeft(show, placement.Outer.X);
+                Canvas.SetTop(show, placement.Plate.Y + 34);
+                desktopShowButtons.Add(show);
+                Button setups = Ui.Button("Link", "Modes", delegate { OpenDesktopSetups(captured); }, "desktop-setups-" + captured.Id);
+                setups.FontSize = 10;
+                setups.Padding = new Thickness(2, 1, 2, 1);
+                setups.Width = Math.Max(1, placement.Outer.Width / 2);
+                setups.Height = 22;
+                AutomationProperties.SetName(setups, "Saved setups for " + VirtualPlateName(captured));
+                notes.Children.Add(setups);
+                Canvas.SetLeft(setups, placement.Outer.X + placement.Outer.Width / 2);
+                Canvas.SetTop(setups, placement.Plate.Y + 34);
+                desktopShowButtons.Add(setups);
+            }
             foreach (Button button in setupButtons) notes.Children.Remove(button);
             setupButtons.Clear();
             if (current != null)
-                foreach (DeskCanvas.Placed unused in canvas.Placements.Where(p => p.Monitor.Online && !p.Used && p.Screen.Height >= 64))
+                foreach (DeskCanvas.Placed unused in canvas.Placements.Where(p => p.Monitor.Online && !p.Used && (p.VirtualPlate != null || p.Screen.Height >= 64)))
                 {
                     MonitorInfo monitor = unused.Monitor;
-                    Button setup = Ui.Button("Btn.Primary", "+", delegate { UseMonitor(monitor); }, "use-monitor-" + monitor.Ordinal);
-                    setup.Width = 34;
-                    setup.Height = 30;
-                    setup.ToolTip = "Set up " + monitor.Name;
-                    AutomationProperties.SetName(setup, "Set up " + monitor.Name);
+                    VirtualPlate plate = unused.VirtualPlate;
+                    string name = plate == null ? monitor.Name : VirtualPlateName(plate);
+                    bool compact = unused.Screen.Width < 130;
+                    Button setup = Ui.Button(plate == null ? "Btn.Primary" : "Btn", plate == null ? "+" : compact ? "Set up\nzones" : "Set up zones", delegate
+                    {
+                        if (plate == null) UseMonitor(monitor);
+                        else UseVirtualPlate(plate);
+                    }, plate == null ? "use-monitor-" + monitor.Ordinal : "use-virtual-" + plate.Id);
+                    setup.Width = plate == null ? 34 : Math.Min(144, Math.Max(1, unused.Screen.Width - (compact ? 4 : 16)));
+                    setup.Height = plate == null ? 30 : compact ? 38 : 36;
+                    if (plate != null) setup.FontSize = compact ? 13 : 16;
+                    if (plate != null && compact) setup.Padding = new Thickness(2, 3, 2, 3);
+                    setup.ToolTip = "Set up zones for " + name + (plate == null ? "" : ". Click anywhere on this plate.");
+                    AutomationProperties.SetName(setup, "Set up zones for " + name);
                     notes.Children.Add(setup);
                     setup.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
                     Canvas.SetLeft(setup, unused.Screen.X + (unused.Screen.Width - setup.DesiredSize.Width) / 2);
-                    Canvas.SetTop(setup, unused.Screen.Y + (unused.Screen.Height - setup.DesiredSize.Height) / 2);
+                    Canvas.SetTop(setup, unused.Screen.Y + (unused.Screen.Height - setup.DesiredSize.Height) / 2 + (plate == null ? 0 : compact ? 8.5 : 11));
                     setupButtons.Add(setup);
                 }
             RenderVirtualStrip();
@@ -1301,36 +1413,51 @@ namespace Slotter
         {
             virtualPlatesRow.Children.Clear();
             virtualChoicesRow.Children.Clear();
-            if (current == null) { virtualStrip.Visibility = Visibility.Collapsed; return; }
-            virtualStrip.Visibility = Visibility.Visible;
-            foreach (VirtualPlate plate in current.VirtualPlates) virtualPlatesRow.Children.Add(VirtualPlateCard(plate));
-            Button ghostButton = Ui.Button("Btn", "+ Virtual", delegate
+            if (current == null)
             {
-                pinningPlateId = null;
-                showingVirtualChoices = !showingVirtualChoices;
-                chosenMonitorKey = null;
-                RenderVirtualStrip();
-            }, "virtual-plate-add");
-            ghostButton.Background = Brushes.Transparent;
-            ghostButton.BorderBrush = Brushes.Transparent;
-            ghostButton.ToolTip = desktopSnapshot != null && desktopSnapshot.Available ? "Create a virtual plate" : "Desktop detection is unavailable";
-            ghostButton.IsEnabled = desktopSnapshot != null && desktopSnapshot.Available;
-            ToolTipService.SetShowOnDisabled(ghostButton, true);
-            Grid ghost = new Grid { Margin = new Thickness(6, 0, 0, 0), MinWidth = 92, Height = 32 };
-            ghost.Children.Add(new Rectangle { Stroke = Ui.B("B.Ink3"), StrokeThickness = 1, StrokeDashArray = new DoubleCollection { 4, 3 }, RadiusX = 3, RadiusY = 3 });
-            ghost.Children.Add(ghostButton);
-            virtualPlatesRow.Children.Add(ghost);
-            if (showingVirtualChoices) RenderVirtualChoices();
+                virtualStrip.Visibility = Visibility.Collapsed;
+                UpdateVirtualStripLayout();
+                return;
+            }
+            List<VirtualPlate> benched = current.VirtualPlates.Where(p => p.Benched).ToList();
+            virtualStrip.Visibility = benched.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            foreach (VirtualPlate plate in benched) virtualPlatesRow.Children.Add(VirtualPlateCard(plate));
+            virtualChoicesRow.Children.Clear();
+            if (showingVirtualChoices)
+            {
+                RenderVirtualChoices();
+                virtualChoicePopup.PlacementTarget = canvas;
+                virtualChoicePopup.HorizontalOffset = canvas.GhostBounds.Right;
+                virtualChoicePopup.VerticalOffset = canvas.GhostBounds.Y + canvas.GhostBounds.Height;
+                virtualChoicePopup.IsOpen = true;
+            }
+            else virtualChoicePopup.IsOpen = false;
+            UpdateVirtualStripLayout();
+        }
+
+        void UpdateVirtualStripLayout()
+        {
+            double stripHeight = current != null && current.VirtualPlates.Any(p => p.Benched) ? 64 : showingVirtualChoices ? 76 : 0;
+            virtualStrip.Height = stripHeight;
+            double reserved = virtualStrip.Visibility == Visibility.Visible ? stripHeight + virtualStrip.Margin.Bottom : 0;
+            if (Math.Abs(canvas.ReservedHeight - reserved) < 0.5) return;
+            canvas.ReservedHeight = reserved;
+            canvas.Refresh();
         }
 
         UIElement VirtualPlateCard(VirtualPlate plate)
         {
             StackPanel card = new StackPanel { Margin = new Thickness(0, 0, 8, 0) };
-            DockPanel header = new DockPanel { Margin = new Thickness(2, 0, 2, 3) };
-            TextBlock badge = Ui.Text(plate.Benched ? plate.Name + " · BENCH" : plate.Name + " · " + DesktopLabel(plate.DesktopId), 10, FontWeights.Bold, "B.Ink2");
+            DockPanel header = new DockPanel { Margin = new Thickness(2, 0, 2, 3), LastChildFill = false };
+            TextBlock badge = Ui.Text("BENCH", 10, FontWeights.Bold, "B.Ink2");
             DockPanel.SetDock(badge, Dock.Left);
             header.Children.Add(badge);
-            Button action = Ui.Button("Link", plate.Benched ? "Pin" : "Bench", delegate
+            TextBlock plateName = Ui.Text(plate.Name + (string.IsNullOrEmpty(plate.ClosedDesktopLabel) ? "" : " · Closed " + plate.ClosedDesktopLabel), 11, FontWeights.SemiBold, "B.Ink");
+            plateName.Margin = new Thickness(6, 0, 0, 0);
+            DockPanel.SetDock(plateName, Dock.Left);
+            header.Children.Add(plateName);
+            string actionText = plate.Benched ? "Pin" : "Bench";
+            Button action = Ui.Button("Link", Ui.Row(4, Ui.Icon(plate.Benched ? "G.Plus" : "G.Tray", 12, false), new TextBlock { Text = actionText, VerticalAlignment = VerticalAlignment.Center }), delegate
             {
                 if (plate.Benched)
                 {
@@ -1341,6 +1468,7 @@ namespace Slotter
                 }
                 else
                 {
+                    RememberGeometry();
                     plate.DesktopId = "";
                     if (sel != null && sel.PlateId == plate.Id) sel = null;
                     Touch();
@@ -1362,6 +1490,7 @@ namespace Slotter
                 Button delete = Ui.Button("Link", "Delete", delegate
                 {
                     if (!Confirm.Ask(this, "Delete this benched plate?", "“" + plate.Name + "” and its zones will be removed from this workspace.", "Delete plate", true)) return;
+                    RememberGeometry();
                     current.Zones.RemoveAll(z => z.PlateId == plate.Id);
                     current.VirtualPlates.Remove(plate);
                     if (sel != null && sel.PlateId == plate.Id) sel = null;
@@ -1376,9 +1505,11 @@ namespace Slotter
             card.Children.Add(header);
             List<Zone> zones = ZonesForPlate(plate);
             MonitorInfo plateMonitor = MonitorOfPlate(plate);
+            DeskCanvas.Placed rendered = plateMonitor == null ? null : canvas.Placements.FirstOrDefault(p => p.Monitor.Key == plateMonitor.Key);
+            DeskLayout.Piece physical = plateMonitor == null ? null : DeskLayout.For(monitors).Pieces.FirstOrDefault(p => p.Monitor.Key == plateMonitor.Key);
             double ratio = plateMonitor != null && plateMonitor.PixelH > 0 ? (double)plateMonitor.PixelW / plateMonitor.PixelH : 16.0 / 9;
-            double thumbScale = Math.Min(148.0 / Math.Max(0.1, ratio), 66);
-            double thumbWidth = ratio * thumbScale, thumbHeight = thumbScale;
+            double thumbWidth = rendered != null ? rendered.Screen.Width * 0.4 : physical != null ? physical.W * canvas.Scale * 0.4 : 0;
+            double thumbHeight = rendered != null ? rendered.Screen.Height * 0.4 : physical != null ? physical.H * canvas.Scale * 0.4 : (ratio > 0 ? thumbWidth / ratio : 0);
             Canvas thumb = new Canvas { Width = thumbWidth, Height = thumbHeight, Background = Ui.B("B.ScreenUnused"), ClipToBounds = true };
             thumb.Children.Add(new Rectangle { Width = thumbWidth, Height = thumbHeight, Stroke = Ui.B("B.Ink3"), StrokeThickness = 1, StrokeDashArray = new DoubleCollection { 4, 3 } });
             for (int i = 0; i < zones.Count; i++)
@@ -1439,7 +1570,7 @@ namespace Slotter
 
         void RenderVirtualChoices()
         {
-            List<MonitorInfo> online = monitors.Where(m => m.Online && current.Zones.Any(z => string.IsNullOrEmpty(z.PlateId) && Monitors.Holds(m, z))).ToList();
+            List<MonitorInfo> online = monitors.Where(m => m.Online).ToList();
             if (pinningPlateId == null && online.Count > 1 && string.IsNullOrEmpty(chosenMonitorKey))
             {
                 virtualChoicesRow.Children.Add(Ui.Text("Choose a monitor", 11, FontWeights.SemiBold, "B.Ink2"));
@@ -1482,24 +1613,21 @@ namespace Slotter
 
         void PinOrCreateVirtual(MonitorInfo monitor, DesktopInfo desktop, string name)
         {
+            RememberGeometry();
             if (pinningPlateId != null)
             {
                 VirtualPlate plate = FindVirtualPlate(pinningPlateId);
                 if (plate == null) return;
                 plate.DesktopId = desktop.Id.ToString();
+                plate.ClosedDesktopLabel = null;
+                if (plate.FollowsDesktopName) plate.Name = name;
                 if (sel == null || sel.PlateId != plate.Id) sel = ZonesForPlate(plate).FirstOrDefault();
             }
             else
             {
                 VirtualPlate plate = new VirtualPlate { Id = Guid.NewGuid().ToString(), Name = name, Mon = monitor.Ordinal, MonKey = monitor.Key, DesktopId = desktop.Id.ToString() };
                 current.VirtualPlates.Add(plate);
-                foreach (Zone source in current.Zones.Where(z => string.IsNullOrEmpty(z.PlateId) && Monitors.Holds(monitor, z)).ToList())
-                {
-                    Zone clone = source.Clone();
-                    clone.PlateId = plate.Id;
-                    current.Zones.Add(clone);
-                }
-                sel = ZonesForPlate(plate).FirstOrDefault();
+                sel = null;
             }
             pinningPlateId = null;
             showingVirtualChoices = false;
@@ -1513,12 +1641,40 @@ namespace Slotter
             return current == null || string.IsNullOrEmpty(id) ? null : current.VirtualPlates.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));
         }
 
+        void UseVirtualPlate(VirtualPlate plate)
+        {
+            if (current == null || plate == null) return;
+            Zone zone = ZonesForPlate(plate).FirstOrDefault();
+            if (zone == null)
+            {
+                RememberGeometry();
+                zone = new Zone { Mon = plate.Mon, MonKey = plate.MonKey, X = 0, Y = 0, W = 100, H = 100, PlateId = plate.Id };
+                current.Zones.Add(zone);
+            }
+            sel = zone;
+            face = "zone";
+            Touch();
+            RenderAll();
+        }
+
         string DesktopLabel(string id)
         {
             if (desktopSnapshot == null) return "Desktop";
             for (int i = 0; i < desktopSnapshot.Desktops.Count; i++)
-                if (desktopSnapshot.Desktops[i].Id.ToString().Equals(id, StringComparison.OrdinalIgnoreCase)) return "Desktop " + (i + 1);
+                if (desktopSnapshot.Desktops[i].Id.ToString().Equals(id, StringComparison.OrdinalIgnoreCase)) return "Windows Desktop " + (i + 1);
             return "Desktop unavailable";
+        }
+
+        int DesktopOrdinal(string id)
+        {
+            return desktopSnapshot == null ? 0 : desktopSnapshot.Desktops.FindIndex(d => d.Id.ToString().Equals(id, StringComparison.OrdinalIgnoreCase)) + 1;
+        }
+
+        string VirtualPlateName(VirtualPlate plate)
+        {
+            if (plate.Benched || !plate.FollowsDesktopName) return plate.Name;
+            int ordinal = DesktopOrdinal(plate.DesktopId);
+            return ordinal > 0 ? "Desktop " + ordinal : "Saved " + plate.Name;
         }
 
         MonitorInfo MonitorOfPlate(VirtualPlate plate)
@@ -1539,6 +1695,80 @@ namespace Slotter
         List<Zone> ZonesOnSelectedPlate(MonitorInfo monitor)
         {
             return current == null ? new List<Zone>() : current.Zones.Where(z => Monitors.Holds(monitor, z) && SamePlate(z, sel)).ToList();
+        }
+
+        string SaveDesktopSetup(string plateId, string raw)
+        {
+            string name = (raw ?? "").Trim();
+            if (name.Length == 0 || name.Length > 48 || name.Any(c => char.IsControl(c) || "[]=,".Contains(c)))
+                return "Use a name of 1–48 characters without [ ] = , or line breaks.";
+            if (desktopSetups.Any(s => string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase))) return "A setup with that name already exists.";
+            var zones = current == null ? new List<Zone>() : current.Zones.Where(z => z.PlateId == plateId).ToList();
+            if (zones.Count == 0) return "Set up zones on this plate before saving a setup.";
+            if (zones.Any(z => CanvasFault(z) != null)) return "Fix this plate’s zone measurements before saving a setup.";
+            var setup = new DesktopSetup { Name = name, Zones = zones.Select(z => new Zone { Mon = 1, X = z.X, Y = z.Y, W = z.W, H = z.H, Prog = z.Prog }.Clamped()).ToList() };
+            desktopSetups.Add(setup);
+            if (!Config.WriteDesktopSetups(desktopSetups)) { desktopSetups.Remove(setup); return "Slotter could not save the setup. Check that its folder is writable."; }
+            return null;
+        }
+
+        void LoadDesktopSetup(DesktopSetup setup, string plateId)
+        {
+            VirtualPlate plate = FindVirtualPlate(plateId);
+            if (plate == null || setup.Zones.Count == 0) return;
+            RememberGeometry();
+            current.Zones.RemoveAll(z => z.PlateId == plateId);
+            var zones = setup.Zones.Select(z => new Zone { Mon = plate.Mon, MonKey = plate.MonKey, X = z.X, Y = z.Y, W = z.W, H = z.H,
+                Prog = library.Any(p => string.Equals(p.Name, z.Prog, StringComparison.OrdinalIgnoreCase)) ? z.Prog : null, PlateId = plate.Id }).ToList();
+            current.Zones.AddRange(zones);
+            Renumber(current);
+            sel = zones.FirstOrDefault();
+            face = "zone";
+            if (desktopSetupsPopup != null) desktopSetupsPopup.IsOpen = false;
+            Touch();
+            RenderAll();
+        }
+
+        void OpenDesktopSetups(VirtualPlate plate)
+        {
+            if (desktopSetupsPopup != null) desktopSetupsPopup.IsOpen = false;
+            var body = new StackPanel { Width = 320, Margin = new Thickness(16) };
+            body.Children.Add(Ui.Text("Desktop setups", 18, FontWeights.Bold, "B.Ink"));
+            var hint = Ui.Text("Load a mode onto this plate. Undo restores its previous zones.", 12, FontWeights.Normal, "B.Ink2");
+            hint.TextWrapping = TextWrapping.Wrap;
+            hint.Margin = new Thickness(0, 8, 0, 12);
+            body.Children.Add(hint);
+            var rows = new StackPanel();
+            foreach (DesktopSetup setup in desktopSetups)
+            {
+                DesktopSetup captured = setup;
+                var load = Ui.Button("Btn", "Load " + setup.Name, delegate { LoadDesktopSetup(captured, plate.Id); }, "load-setup-" + setup.Name);
+                load.HorizontalAlignment = HorizontalAlignment.Stretch;
+                load.Margin = new Thickness(0, 0, 0, 6);
+                rows.Children.Add(load);
+            }
+            if (desktopSetups.Count == 0) rows.Children.Add(Ui.Text("No saved setups yet.", 12, FontWeights.Normal, "B.Ink2"));
+            body.Children.Add(new ScrollViewer { Content = rows, MaxHeight = 180, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled });
+            var name = new Field { Style = Ui.S("Field"), Height = 32, Margin = new Thickness(0, 12, 0, 8) };
+            AutomationProperties.SetName(name, "Setup name");
+            body.Children.Add(name);
+            var message = Ui.Text("", 12, FontWeights.Normal, "B.Ink2");
+            message.TextWrapping = TextWrapping.Wrap;
+            var save = Ui.Button("Btn", "Save this layout", delegate
+            {
+                string error = SaveDesktopSetup(plate.Id, name.Text);
+                if (error != null) { message.Text = error; message.Foreground = Ui.B("B.Error"); }
+                else { OpenDesktopSetups(plate); }
+            }, "save-desktop-setup");
+            body.Children.Add(save);
+            body.Children.Add(message);
+            body.PreviewKeyDown += delegate (object sender, KeyEventArgs e) { if (e.Key == Key.Escape) { desktopSetupsPopup.IsOpen = false; e.Handled = true; } };
+            TextElement.SetFontFamily(body, Ui.UiFont);
+            TextElement.SetForeground(body, Ui.B("B.Ink"));
+            desktopSetupsPopup = new Popup { PlacementTarget = canvas, Placement = PlacementMode.Center, StaysOpen = false, AllowsTransparency = true,
+                Child = new Border { Background = Ui.B("B.Menu"), BorderBrush = Ui.B("B.Rule"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(4), Child = body } };
+            desktopSetupsPopup.IsOpen = true;
+            Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(delegate { name.Focus(); }));
         }
 
         void ToggleFace(string f)
@@ -1632,7 +1862,7 @@ namespace Slotter
             if (selectedPlate != null && !virtualNameField.IsKeyboardFocusWithin)
             {
                 syncing = true;
-                virtualNameField.Text = selectedPlate.Name;
+                virtualNameField.Text = VirtualPlateName(selectedPlate);
                 syncing = false;
             }
             if (selectedPlate != null && !zCur.Children.Contains(virtualNameField)) zCur.Children.Insert(0, virtualNameField);
@@ -2029,6 +2259,9 @@ namespace Slotter
                 string name = text.Trim();
                 if (name != progSel.Name)
                 {
+                    foreach (DesktopSetup setup in desktopSetups)
+                        foreach (Zone z in setup.Zones)
+                            if (string.Equals(z.Prog, progSel.Name, StringComparison.OrdinalIgnoreCase)) z.Prog = name;
                     foreach (Profile ws in work)
                         foreach (Zone z in ws.Zones)
                             if (string.Equals(z.Prog, progSel.Name, StringComparison.OrdinalIgnoreCase)) z.Prog = name;
@@ -2464,7 +2697,7 @@ namespace Slotter
 
         GeometryState GeometrySnapshot()
         {
-            return new GeometryState { Zones = current.Zones.Select(z => z.Clone()).ToList(), Selected = current.Zones.IndexOf(sel) };
+            return new GeometryState { Zones = current.Zones.Select(z => z.Clone()).ToList(), Plates = current.VirtualPlates.Select(p => p.Clone()).ToList(), Selected = current.Zones.IndexOf(sel) };
         }
 
         void RememberGeometry()
@@ -2492,6 +2725,8 @@ namespace Slotter
             GeometryState state = from[from.Count - 1];
             from.RemoveAt(from.Count - 1);
             current.Zones = state.Zones.Select(z => z.Clone()).ToList();
+            current.VirtualPlates = state.Plates.Select(p => p.Clone()).ToList();
+            ReconcileWorkDesktops();
             sel = current.Zones.ElementAtOrDefault(state.Selected) ?? current.Zones.FirstOrDefault();
             editingPosition = null;
             shownZone = null;
@@ -2558,6 +2793,7 @@ namespace Slotter
                 new Dictionary<SnapAction, KeyCombo>(shortcutMap), snapShortcutsOn, followDesktop,
                 new Dictionary<string, string>(desktopBindings, StringComparer.OrdinalIgnoreCase),
                 new Dictionary<string, string>(profileRenames, StringComparer.OrdinalIgnoreCase))) { RenderAll(); return false; }
+            if (!Config.WriteDesktopSetups(desktopSetups)) { RenderAll(); return false; }
             Keep(savedWork, savedLibrary);
             dirty = problems.Count > 0;
             justSaved = !dirty;
@@ -2828,7 +3064,7 @@ namespace Slotter
             if (name.Length == 0) return "Give the workspace a name.";
             if (name.Length > 48) return "Use 48 characters or fewer.";
             if (name.IndexOfAny(new[] { '[', ']', '=', ',' }) >= 0) return "Names cannot contain [ ] = ,";
-            foreach (string reserved in new[] { "Profiles", "Programs", "Panel", "Settings", "Displays", "DesktopBindings", "Shortcuts" })
+            foreach (string reserved in new[] { "Profiles", "Programs", "Panel", "Settings", "Displays", "DesktopBindings", "Shortcuts", "DesktopSetups" })
                 if (string.Equals(name, reserved, StringComparison.OrdinalIgnoreCase)) return "That name is reserved by Slotter.";
             foreach (Profile p in work)
                 if (p != self && string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase)) return "A workspace with that name already exists.";

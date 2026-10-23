@@ -59,17 +59,46 @@ public final class SpaceRegistry: SpaceRegistryProviding, @unchecked Sendable {
     private typealias MainConnection = @convention(c) () -> Int32
     private typealias CopyManagedSpaces = @convention(c) (Int32) -> Unmanaged<CFArray>?
     private typealias ActiveSpace = @convention(c) (Int32) -> UInt64
+    private typealias CopyWindowSpaces = @convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?
 
     private let library: UnsafeMutableRawPointer?
     private let mainConnection: MainConnection?
     private let copyManagedSpaces: CopyManagedSpaces?
     private let activeSpace: ActiveSpace?
+    private let copyWindowSpaces: CopyWindowSpaces?
 
     public init() {
         library = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
         mainConnection = Self.symbol("CGSMainConnectionID", in: library, as: MainConnection.self)
         copyManagedSpaces = Self.symbol("CGSCopyManagedDisplaySpaces", in: library, as: CopyManagedSpaces.self)
         activeSpace = Self.symbol("CGSGetActiveSpace", in: library, as: ActiveSpace.self)
+        copyWindowSpaces = Self.symbol("SLSCopySpacesForWindows", in: library, as: CopyWindowSpaces.self)
+            ?? Self.symbol("CGSCopySpacesForWindows", in: library, as: CopyWindowSpaces.self)
+    }
+
+    public func spaces(for windowID: CGWindowID) -> Set<UInt64>? {
+        guard let mainConnection, let copyWindowSpaces,
+              let raw = copyWindowSpaces(mainConnection(), 0x7, [NSNumber(value: windowID)] as CFArray),
+              let values = raw.takeRetainedValue() as? [NSNumber], !values.isEmpty else { return nil }
+        let ids = Set(values.map(\.uint64Value))
+        return ids.contains(0) ? nil : ids
+    }
+
+    public func windowIsOnDesktop(_ window: AXElement, expected: SpaceSnapshot) -> Bool {
+        guard let id = AX.windowID(of: window) else { return false }
+        return Self.membershipMatches(spaces(for: id), expected: expected, current: snapshot())
+    }
+
+    static func membershipMatches(_ membership: Set<UInt64>?, expected: SpaceSnapshot, current: SpaceSnapshot) -> Bool {
+        guard expected.available, current.available, let membership, !membership.isEmpty else { return false }
+        let before = Dictionary(uniqueKeysWithValues: expected.displays.map { ($0.displayUUID, $0.currentSpaceUUID) })
+        let now = Dictionary(uniqueKeysWithValues: current.displays.map { ($0.displayUUID, $0.currentSpaceUUID) })
+        guard before == now else { return false }
+        let active = Set(expected.displays.compactMap { display -> UInt64? in
+            guard let space = display.currentSpace, space.type == 0 else { return nil }
+            return space.id
+        })
+        return !active.isDisjoint(with: membership)
     }
 
     public func snapshot() -> SpaceSnapshot {
@@ -156,6 +185,19 @@ public struct VirtualPlateResolver {
 
     public init(registry: any SpaceRegistryProviding = SpaceRegistry.shared) {
         self.registry = registry
+    }
+
+    public func workspaceForLaunch(_ workspace: Workspace) -> Workspace {
+        let resolution = resolve(manualWorkspace: workspace, workspaces: [workspace])
+        guard resolution.snapshot.available else { return physicalWorkspace(workspace) }
+        var plan = workspace
+        plan.zones = workspace.zones.filter { zone in
+            guard let display = resolution.snapshot.displays.first(where: {
+                matchesDisplay(zone.monitor, displayUUID: $0.displayUUID)
+            }) else { return zone.plateID == nil }
+            return resolution.workspacesByDisplay[display.displayUUID]?.zones.contains { $0.id == zone.id } == true
+        }
+        return plan
     }
 
     public func resolve(manualWorkspace: Workspace?, workspaces: [Workspace])

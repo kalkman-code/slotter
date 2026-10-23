@@ -83,14 +83,17 @@ public enum SnapEngine {
     }
 
     @discardableResult
-    public static func snap(window: AXElement, to target: CGRect, label: String) async -> WindowPlacer.Outcome {
-        var outcome = await AX.perform { WindowPlacer.place(window, into: target) }
+    public static func snap(window: AXElement, to target: CGRect, label: String,
+                            validation: (@Sendable () -> Bool)? = nil) async -> WindowPlacer.Outcome {
+        guard !Task.isCancelled else { return .failed(.gone) }
+        var outcome = await AX.perform(cancelledValue: WindowPlacer.Outcome.failed(.gone)) { WindowPlacer.place(window, into: target, validation: validation) }
         var attempts = 0
 
         while case .retryable = outcome.failure, attempts < 8 {
             attempts += 1
             try? await Task.sleep(for: .milliseconds(150))
-            outcome = await AX.perform { WindowPlacer.place(window, into: target) }
+            guard !Task.isCancelled else { return .failed(.gone) }
+            outcome = await AX.perform(cancelledValue: WindowPlacer.Outcome.failed(.gone)) { WindowPlacer.place(window, into: target, validation: validation) }
         }
 
         if let failure = outcome.failure {

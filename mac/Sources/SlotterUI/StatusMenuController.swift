@@ -15,6 +15,7 @@ public final class StatusMenuController: NSObject {
         public var forceQuitAll: () -> Void
         public var grantAccessibility: () -> Void
         public var quit: () -> Void
+        public var checkForUpdates: () -> Void
 
         public init(launch: @escaping (Workspace) -> Void,
                     clearActiveZones: @escaping () -> Void,
@@ -26,7 +27,8 @@ public final class StatusMenuController: NSObject {
                     closeAll: @escaping () -> Void,
                     forceQuitAll: @escaping () -> Void,
                     grantAccessibility: @escaping () -> Void,
-                    quit: @escaping () -> Void) {
+                    quit: @escaping () -> Void,
+                    checkForUpdates: @escaping () -> Void = {}) {
             self.launch = launch
             self.clearActiveZones = clearActiveZones
             self.openSettings = openSettings
@@ -38,12 +40,14 @@ public final class StatusMenuController: NSObject {
             self.forceQuitAll = forceQuitAll
             self.grantAccessibility = grantAccessibility
             self.quit = quit
+            self.checkForUpdates = checkForUpdates
         }
     }
 
     public var config = SlotterConfig()
     public var activeWorkspace = ""
     public var shortcutRegistrations: [ShortcutCenter.Registration] = []
+    public var canCheckForUpdates = false
 
     private let callbacks: Callbacks
     private var statusItem: NSStatusItem?
@@ -96,6 +100,7 @@ public final class StatusMenuController: NSObject {
     @objc private func closeAll() { callbacks.closeAll() }
     @objc private func forceQuitAll() { callbacks.forceQuitAll() }
     @objc private func quit() { callbacks.quit() }
+    @objc private func checkForUpdates() { callbacks.checkForUpdates() }
 
     @objc private func toggleLoginItem() {
         switch LoginItem.state {
@@ -142,7 +147,7 @@ extension StatusMenuController: NSMenuDelegate {
                 let item = NSMenuItem(title: workspace.name, action: #selector(launchWorkspace(_:)), keyEquivalent: "")
                 item.target = self
                 let offline = Self.offlineMonitors(workspace, snapshot)
-                let apps = workspace.zones.filter { !($0.program ?? "").isEmpty }.count
+                let apps = VirtualPlateResolver().workspaceForLaunch(workspace).zones.filter { !($0.program ?? "").isEmpty }.count
                 if !workspace.zones.isEmpty && offline.count == Set(workspace.zones.map { DeskPlanner.key(for: $0.monitor, in: snapshot) }).count {
                     item.isEnabled = false
                     item.detail(Self.offlineNames(workspace, snapshot, remembered) + " offline")
@@ -167,6 +172,11 @@ extension StatusMenuController: NSMenuDelegate {
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
+
+        let updates = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        updates.target = self
+        updates.isEnabled = canCheckForUpdates
+        menu.addItem(updates)
 
         let programs = NSMenuItem(title: "Programs…", action: #selector(openPrograms), keyEquivalent: "")
         programs.target = self
@@ -240,6 +250,13 @@ extension StatusMenuController: NSMenuDelegate {
         return NSMenuItem(
             title: failures == 0 ? "Snap shortcuts" : "Snap shortcuts, \(failures) unavailable",
             action: nil, keyEquivalent: "").withSubmenu(submenu)
+    }
+}
+
+extension StatusMenuController: NSMenuItemValidation {
+    public func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(checkForUpdates) { return canCheckForUpdates }
+        return menuItem.isEnabled
     }
 }
 

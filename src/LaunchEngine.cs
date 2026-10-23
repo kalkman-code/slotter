@@ -17,13 +17,20 @@ namespace Slotter
 
         static readonly HashSet<string> ShellExeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "pwsh", "powershell", "cmd", "wt" };
 
-        public static LaunchResult LaunchApps(Profile p, List<ProgItem> lib)
+        public static LaunchResult LaunchApps(Profile p, List<ProgItem> lib, Func<bool> isCurrent = null)
         {
             LaunchResult result = new LaunchResult();
+            bool Continue()
+            {
+                if (isCurrent == null || isCurrent()) return true;
+                result.Cancelled = true;
+                return false;
+            }
+            if (!Continue()) return result;
             Screen[] screens = Screen.AllScreens;
             foreach (Zone z in p.Zones)
             {
-                if (!string.IsNullOrEmpty(z.PlateId)) continue;
+                if (!Continue()) return result;
                 if (string.IsNullOrEmpty(z.Prog)) continue;
                 if (Config.ResolveScreenIndex(z, screens) < 0) { Log.Write("skip " + z.Prog + ": monitor " + z.Mon + " disconnected"); continue; }
                 result.Planned++;
@@ -45,6 +52,7 @@ namespace Slotter
                     string exeName = Path.GetFileNameWithoutExtension(exe);
                     string[] watchNames = ShellExeNames.Contains(exeName) ? new[] { exeName, "WindowsTerminal" } : new[] { exeName };
                     HashSet<IntPtr> before = SnapEngine.WindowsOf(watchNames);
+                    if (!Continue()) return result;
                     Process started = Process.Start(new ProcessStartInfo(exe, args) { UseShellExecute = true });
                     if (started != null)
                     {
@@ -61,18 +69,22 @@ namespace Slotter
                     IntPtr hwnd = IntPtr.Zero;
                     for (int i = 0; i < 50 && hwnd == IntPtr.Zero; i++)
                     {
+                        if (!Continue()) return result;
                         Thread.Sleep(100);
                         foreach (IntPtr w in SnapEngine.WindowsOf(watchNames))
                             if (!before.Contains(w)) { hwnd = w; break; }
                     }
+                    if (!Continue()) return result;
                     if (hwnd == IntPtr.Zero)
                     {
                         string error = "No new " + exeName + " window appeared.";
                         Log.Write(error); if (result.FirstError == null) result.FirstError = error; continue;
                     }
                     Thread.Sleep(400); // let the window finish creating before we move it
+                    if (!Continue()) return result;
                     bool moved = SnapEngine.MoveToZone(hwnd, z);
                     Thread.Sleep(500);
+                    if (!Continue()) return result;
                     if (!moved || !IsWindowVisible(hwnd))
                         foreach (IntPtr w in SnapEngine.WindowsOf(watchNames))
                             if (!before.Contains(w)) { hwnd = w; break; }

@@ -46,8 +46,11 @@ struct DrawerView: View {
                 }
                     .modifier(Face(narrow: layout.stacked))
             } else if model.face == .shortcuts {
-                ShortcutsFace(model: model, layout: layout)
-                    .modifier(Face(narrow: layout.stacked))
+                ScrollView(.vertical) {
+                    ShortcutsFace(model: model, layout: layout)
+                        .modifier(Face(narrow: layout.stacked))
+                }
+                .frame(height: min(360, max(160, layout.height - 360)))
             }
         }
         .background(P.drawer)
@@ -340,19 +343,29 @@ private struct VirtualPlateNameField: View {
     init(model: SettingsModel, plate: VirtualPlate) {
         self.model = model
         self.plate = plate
-        _draftName = State(initialValue: plate.name)
+        _draftName = State(initialValue: model.virtualPlateName(plate))
     }
 
     var body: some View {
-        HStack(spacing: 8) {
+        WrapLayout(spacing: 8, lineSpacing: 6) {
             Text("Virtual plate").font(T.font(T.type.small, .semibold)).foregroundStyle(P.ink2)
             InkTextField(text: $draftName, font: T.font(T.type.body, .semibold), focus: $focused)
                 .frame(width: 220, height: 30)
                 .box(invalid: draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .accessibilityLabel("Virtual plate name")
-                .onChange(of: draftName) { _, value in model.renameVirtualPlate(plate.id, to: value) }
-                .onChange(of: plate.name) { _, value in if !focused { draftName = value } }
+                .onChange(of: draftName) { _, value in if focused { model.renameVirtualPlate(plate.id, to: value) } }
+                .onChange(of: model.virtualPlateName(plate)) { _, value in if !focused { draftName = value } }
                 .onSubmit { focused = false }
+            Text(model.desktopDescription(plate))
+                .font(T.font(T.type.small, .semibold)).foregroundStyle(P.ink2)
+            if plate.desktopID != nil {
+                Button("Show desktop") { model.showDesktop(plate) }.buttonStyle(InkButtonStyle(kind: .quiet))
+            }
+            DesktopSetupsControl(model: model, plate: plate)
+            if model.selectedZone == nil {
+                Button("Undo") { model.undoLayout() }.buttonStyle(InkButtonStyle(kind: .quiet)).disabled(!model.canUndoLayout)
+                Button("Redo") { model.redoLayout() }.buttonStyle(InkButtonStyle(kind: .quiet)).disabled(!model.canRedoLayout)
+            }
             if draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text("Enter a name.").font(T.font(T.type.small, .semibold)).foregroundStyle(P.error)
             }
@@ -362,6 +375,71 @@ private struct VirtualPlateNameField: View {
             focused = true
             model.focusVirtualPlateName = false
         }
+    }
+}
+
+struct DesktopSetupsControl: View {
+    @Bindable var model: SettingsModel
+    let plate: VirtualPlate
+    var compact = false
+    @State private var showing = false
+    @State private var name = ""
+    @State private var error: String?
+    @State private var saved = false
+    @FocusState private var nameFocused: Bool
+
+    var body: some View {
+        Group {
+            if compact {
+                Button("Modes") { showing.toggle() }
+                    .font(T.font(10, .semibold)).foregroundStyle(P.ink2)
+                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                    .buttonStyle(.plain).focusRing()
+            } else {
+                Button("Setups…") { showing.toggle() }.buttonStyle(InkButtonStyle(kind: .quiet))
+            }
+        }
+            .accessibilityLabel("Saved setups for \(model.virtualPlateName(plate))")
+            .popover(isPresented: $showing) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Desktop setups").font(T.font(T.type.heading, .bold))
+                    Text("Load a mode onto this plate. Undo restores its previous zones.")
+                        .font(T.font(T.type.small)).foregroundStyle(P.ink2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(model.desktopSetups) { setup in
+                                HStack {
+                                    Text(setup.name).font(T.font(T.type.body, .semibold)).lineLimit(2)
+                                    Spacer()
+                                    Button("Load") { model.loadDesktopSetup(setup, onto: plate.id); showing = false }
+                                        .buttonStyle(InkButtonStyle())
+                                        .accessibilityLabel("Load setup \(setup.name)")
+                                }
+                            }
+                            if model.desktopSetups.isEmpty {
+                                Text("No saved setups yet.").font(T.font(T.type.small)).foregroundStyle(P.ink2)
+                            }
+                        }
+                    }.frame(maxHeight: 180)
+                    Divider().overlay(P.rule)
+                    InkTextField(text: $name, font: T.font(T.type.body), focus: $nameFocused)
+                        .frame(height: 30).box()
+                        .accessibilityLabel("Setup name")
+                        .onChange(of: name) { _, _ in error = nil; saved = false }
+                    HStack {
+                        Button("Save this layout") {
+                            error = model.saveDesktopSetup(plate.id, name: name)
+                            saved = error == nil
+                        }.buttonStyle(InkButtonStyle())
+                        Spacer()
+                        Button("Done") { showing = false }.buttonStyle(InkButtonStyle(kind: .quiet))
+                    }
+                    if let error { Text(error).font(T.font(T.type.small)).foregroundStyle(P.error).fixedSize(horizontal: false, vertical: true) }
+                    if saved { Text("Setup saved.").font(T.font(T.type.small)).foregroundStyle(P.ink2) }
+                }
+                .padding(16).frame(width: 340).background(P.floating)
+            }
     }
 }
 
@@ -681,12 +759,14 @@ private struct SettingsFace: View {
                 Text("Slotter settings").font(T.font(T.type.select, .extraBold)).foregroundStyle(P.ink).padding(.bottom, 0)
                 login
                 accessibility
+                updates
             }
         } else {
             HStack(alignment: .top, spacing: 0) {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Slotter settings").font(T.font(T.type.heading, .extraBold)).tracking(-0.2).foregroundStyle(P.ink)
                     login
+                    updates
                 }
                 .padding(.trailing, 24)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -738,6 +818,28 @@ private struct SettingsFace: View {
                 }
             }
         }
+    }
+
+    private var updates: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Updates").font(T.font(T.type.body, .bold)).foregroundStyle(P.ink)
+                    Text("Check automatically once a day.")
+                        .font(T.font(T.type.small)).foregroundStyle(P.ink2)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                SwitchPill(isOn: model.status.automaticUpdates) {
+                    model.actions.setAutomaticUpdates(!model.status.automaticUpdates)
+                }
+                .accessibilityLabel("Check for updates automatically")
+            }
+            Button("Check now") { model.actions.checkForUpdates() }
+                .buttonStyle(InkButtonStyle())
+                .disabled(!model.status.canCheckForUpdates)
+        }
+        .padding(.top, 8)
     }
 }
 
@@ -910,6 +1012,8 @@ private final class ShortcutRecorder {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
         recording = nil
+        action = nil
+        error = nil
         onCapture = nil
         ShortcutCenter.shared.resumeAfterRecording()
     }
@@ -931,6 +1035,7 @@ private final class ShortcutRecorder {
             return true
         }
         if flags.isEmpty, [UInt16(kVK_Delete), UInt16(kVK_ForwardDelete)].contains(keyCode) {
+            error = nil
             onCapture?(target, nil)
             finish()
             return true
@@ -945,6 +1050,7 @@ private final class ShortcutRecorder {
             error = "Add at least one modifier. Press Escape to cancel."
             return true
         }
+        error = nil
         onCapture?(target, KeyCombo(keyCode: UInt32(keyCode), modifiers: modifiers))
         finish()
         return true

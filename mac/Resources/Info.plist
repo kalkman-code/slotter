@@ -24,6 +24,22 @@
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>SUFeedURL</key>
+	<string>https://kalkmancode.co.uk/slotter/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>2yGrki7PuVRnR2eos8HoBWwfDazAhdI/P3A3LzSCbZc=</string>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUEnableSystemProfiling</key>
+	<false/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 Toby Kalkman, GPL-3.0</string>
 	<key>NSSupportsAutomaticTermination</key>

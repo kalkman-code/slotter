@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Input;
@@ -16,13 +17,24 @@ namespace Slotter
     {
         public List<MonitorInfo> Monitors = new List<MonitorInfo>();
         public Profile Profile;
+        public List<VirtualPlate> VirtualPlates = new List<VirtualPlate>();
         public Zone Selected;
         public List<ProgItem> Library = new List<ProgItem>();
         public bool Narrow;
+        public double ReservedHeight;
+        public double Scale { get; private set; }
         public Func<Zone, string> Fault = delegate { return null; };
+        public Func<string, string> DesktopLabel = delegate { return "Desktop"; };
+        public Func<string, int> DesktopOrdinal = delegate { return 0; };
+        public Func<VirtualPlate, string> PlateName = plate => plate.Name;
+        public Rect GhostBounds { get { return addGhost; } }
 
         public event Action<Zone> ZoneClicked;
         public event Action Laid;
+        public event Action VirtualAddClicked;
+        public event Action<VirtualPlate> VirtualSetupClicked;
+        public event Action<VirtualPlate> VirtualBenchClicked;
+        public event Action<VirtualPlate> VirtualRenameClicked;
 
         public sealed class Placed
         {
@@ -31,12 +43,15 @@ namespace Slotter
             public Point Plate;
             public double PlateHalf;
             public bool Used;
+            public VirtualPlate VirtualPlate;
         }
 
         public readonly List<Placed> Placements = new List<Placed>();
         readonly List<KeyValuePair<Zone, Rect>> zoneRects = new List<KeyValuePair<Zone, Rect>>();
         double deskTop;
         Zone hover;
+        Rect addGhost;
+        double ghostNeckWidth, ghostFootWidth;
 
         public DeskCanvas()
         {
@@ -64,11 +79,32 @@ namespace Slotter
             if (Laid != null) Laid();
         }
 
+        public Rect VirtualNameBounds(string plateId)
+        {
+            Placed p = Placements.FirstOrDefault(item => item.VirtualPlate != null && string.Equals(item.VirtualPlate.Id, plateId, StringComparison.OrdinalIgnoreCase));
+            return p == null ? Rect.Empty : new Rect(p.Plate.X - p.PlateHalf, p.Plate.Y - 2, p.PlateHalf * 2, 18);
+        }
+
+        Rect VirtualBenchBounds(string plateId)
+        {
+            Placed p = Placements.FirstOrDefault(item => item.VirtualPlate != null && string.Equals(item.VirtualPlate.Id, plateId, StringComparison.OrdinalIgnoreCase));
+            if (p == null) return Rect.Empty;
+            FormattedText badge = Txt(PlateDesktopLabel(p), 10, FontWeights.SemiBold, B("B.Ink2"), p.Outer.Width - 23);
+            double width = badge.Width + 5 + 18;
+            return new Rect(p.Plate.X + width / 2 - 18, p.Plate.Y + 14, 18, 17);
+        }
+
         protected override Size ArrangeOverride(Size finalSize)
         {
             Compute(finalSize);
             if (Laid != null) Dispatcher.BeginInvoke(new Action(delegate { if (Laid != null) Laid(); }));
             return finalSize;
+        }
+
+        string PlateDesktopLabel(Placed p)
+        {
+            int ordinal = DesktopOrdinal(p.VirtualPlate.DesktopId);
+            return p.Outer.Width < 130 && ordinal > 0 ? "Win " + ordinal : DesktopLabel(p.VirtualPlate.DesktopId);
         }
 
         void Compute(Size size)
@@ -77,20 +113,36 @@ namespace Slotter
             zoneRects.Clear();
             double W = Math.Max(1, size.Width), H = Math.Max(1, size.Height);
             DeskLayout d = DeskLayout.For(Monitors);
-            double capH = Narrow ? 34 : 42, pad = Narrow ? 12 : 32;
-            double s = Math.Max(2, Math.Min((W - pad * 2) / d.Width, (H - capH - 10) / d.DeskY));
-            double ox = (W - d.Width * s) / 2;
-            double free = H - capH - d.DeskY * s;
+            List<VirtualPlate> pinned = Profile == null ? new List<VirtualPlate>() : Profile.VirtualPlates.Where(p => !p.Benched)
+                .OrderBy(p => DesktopOrdinal(p.DesktopId) > 0 ? DesktopOrdinal(p.DesktopId) : int.MaxValue).ToList();
+            double extra = 0;
+            foreach (VirtualPlate plate in pinned)
+            {
+                MonitorInfo monitor = PlateMonitor(plate);
+                DeskLayout.Piece piece = d.Pieces.FirstOrDefault(p => monitor != null && p.Monitor.Key == monitor.Key) ?? d.Pieces.LastOrDefault();
+                if (piece != null) extra += piece.W + 2 * DeskLayout.Bezel;
+            }
+            DeskLayout.Piece tail = d.Pieces.FirstOrDefault();
+            double ghostW = tail == null ? 0 : tail.W + 2 * DeskLayout.Bezel;
+            double totalWidth = d.Width + extra + ghostW + (pinned.Count + 1) * DeskLayout.Gap;
+            double capH = Narrow ? 64 : 68, pad = Narrow ? 12 : 32;
+            double deskHeight = Math.Max(1, H - ReservedHeight);
+            double s = Math.Max(0.1, Math.Min((W - pad * 2) / totalWidth, (deskHeight - capH - 10) / d.DeskY));
+            Scale = s;
+            double ox = (W - totalWidth * s) / 2;
+            double free = deskHeight - capH - d.DeskY * s;
             // Monitors sit a little below centre so the desk reads as a surface; in the narrow
             // first run they drop to the desk line to leave room for the note above them.
             double oy = Math.Max(4, free - Math.Max(0, free * (Profile == null && Narrow ? 0 : 0.35)));
             deskTop = Math.Round(oy + d.DeskY * s);
+            double gapPx = DeskLayout.Gap * s;
+            double cursorX = ox;
 
             foreach (DeskLayout.Piece p in d.Pieces)
             {
                 double bz = Math.Max(3, DeskLayout.Bezel * s), chin = Math.Max(5, DeskLayout.Chin * s);
                 double sw = p.W * s, sh = p.H * s;
-                double left = Math.Round(ox + p.X * s - bz), top = Math.Round(oy + p.Y * s - bz);
+                double left = Math.Round(cursorX), top = Math.Round(oy + d.DeskY * s - DeskLayout.Clearance * s - (p.H * s + bz + chin));
                 Rect outer = new Rect(left, top, Math.Round(sw + 2 * bz), Math.Round(sh + bz + chin));
                 Rect screen = new Rect(Math.Round(left + bz), Math.Round(top + bz), Math.Round(sw), Math.Round(sh));
                 double cx = outer.X + outer.Width / 2;
@@ -101,7 +153,7 @@ namespace Slotter
                     Neck = new Rect(Math.Round(cx - neckW / 2), outer.Bottom, Math.Round(neckW), Math.Max(0, deskTop - footH - outer.Bottom)),
                     Foot = new Rect(Math.Round(cx - footW / 2), deskTop - Math.Round(footH), Math.Round(footW), Math.Round(footH)),
                     Plate = new Point(cx, deskTop + (Narrow ? 4 : 8)),
-                    PlateHalf = PlateWidth(p.Monitor) / 2
+                    PlateHalf = outer.Width / 2
                 };
                 if (Profile != null)
                     foreach (Zone z in Profile.Zones)
@@ -114,7 +166,51 @@ namespace Slotter
                         zoneRects.Add(new KeyValuePair<Zone, Rect>(z, Snap(r)));
                     }
                 Placements.Add(pl);
+                cursorX = left + outer.Width + gapPx;
             }
+
+            double virtualX = cursorX;
+            foreach (VirtualPlate plate in pinned)
+            {
+                MonitorInfo monitor = PlateMonitor(plate);
+                DeskLayout.Piece piece = d.Pieces.FirstOrDefault(p => monitor != null && p.Monitor.Key == monitor.Key) ?? tail;
+                if (piece == null) continue;
+                double bz = Math.Max(3, DeskLayout.Bezel * s), chin = Math.Max(5, DeskLayout.Chin * s);
+                double sw = piece.W * s, sh = piece.H * s, left = Math.Round(virtualX);
+                double top = Math.Round(oy + d.DeskY * s - DeskLayout.Clearance * s - (sh + bz + chin));
+                Rect outer = new Rect(left, top, Math.Round(sw + 2 * bz), Math.Round(sh + bz + chin));
+                Rect screen = new Rect(Math.Round(left + bz), Math.Round(top + bz), Math.Round(sw), Math.Round(sh));
+                double cx = outer.X + outer.Width / 2, footH = Math.Max(4, DeskLayout.FootH * s);
+                double neckW = Math.Max(8, piece.Neck * s), footW = piece.Foot * s;
+                Placed pl = new Placed { Monitor = piece.Monitor, VirtualPlate = plate, Outer = outer, Screen = screen,
+                    Neck = new Rect(Math.Round(cx - neckW / 2), outer.Bottom, Math.Round(neckW), Math.Max(0, deskTop - footH - outer.Bottom)),
+                    Foot = new Rect(Math.Round(cx - footW / 2), deskTop - Math.Round(footH), Math.Round(footW), Math.Round(footH)),
+                    Plate = new Point(cx, deskTop + (Narrow ? 4 : 8)), PlateHalf = outer.Width / 2 };
+                foreach (Zone z in Profile.Zones.Where(z => string.Equals(z.PlateId, plate.Id, StringComparison.OrdinalIgnoreCase)))
+                {
+                    pl.Used = true;
+                    zoneRects.Add(new KeyValuePair<Zone, Rect>(z, Snap(new Rect(screen.X + screen.Width * z.X / 100 + 2,
+                        screen.Y + screen.Height * z.Y / 100 + 2, Math.Max(1, screen.Width * z.W / 100 - 4), Math.Max(1, screen.Height * z.H / 100 - 4)))));
+                }
+                Placements.Add(pl);
+                virtualX = left + outer.Width + gapPx;
+            }
+            if (tail == null) addGhost = Rect.Empty;
+            else
+            {
+                double bz = Math.Max(3, DeskLayout.Bezel * s), chin = Math.Max(5, DeskLayout.Chin * s);
+                double sw = tail.W * s, sh = tail.H * s;
+                ghostNeckWidth = Math.Max(8, tail.Neck * s);
+                ghostFootWidth = tail.Foot * s;
+                addGhost = new Rect(Math.Round(virtualX), Math.Round(oy + d.DeskY * s - DeskLayout.Clearance * s - (sh + bz + chin)),
+                    Math.Max(1, Math.Round(sw + 2 * bz)), Math.Max(1, Math.Round(sh + bz + chin)));
+            }
+        }
+
+        MonitorInfo PlateMonitor(VirtualPlate plate)
+        {
+            return Monitors.FirstOrDefault(m => string.Equals(m.Key, plate.MonKey, StringComparison.OrdinalIgnoreCase))
+                ?? Monitors.FirstOrDefault(m => m.Ordinal == plate.Mon);
         }
 
         static Rect Snap(Rect r) { return new Rect(Math.Round(r.X), Math.Round(r.Y), Math.Max(1, Math.Round(r.Width)), Math.Max(1, Math.Round(r.Height))); }
@@ -128,8 +224,6 @@ namespace Slotter
 
             LinearGradientBrush surface = Vertical(Ui.C("B.Desk"), Ui.C("B.Desk2"));
             dc.DrawRectangle(surface, null, new Rect(0, deskTop, W, Math.Max(0, H - deskTop)));
-            dc.DrawRectangle(B("B.DeskEdge"), null, new Rect(0, deskTop, W, 1));
-
             foreach (Placed p in Placements)
             {
                 bool off = !p.Monitor.Online;
@@ -145,12 +239,13 @@ namespace Slotter
                 bezel.GradientStops.Add(new GradientStop(Ui.C("B.Bezel"), 0.18));
                 Pen edge = new Pen(B("B.BezelEdge"), 1);
                 if (off) edge.DashStyle = new DashStyle(new double[] { 3, 3 }, 0);
+                if (p.VirtualPlate != null) edge = new Pen(B("B.Selection"), 1.5) { DashStyle = new DashStyle(new double[] { 5, 3 }, 0) };
                 double rm = Ui.D("R.Monitor");
                 dc.DrawRoundedRectangle(off ? B("B.Bezel") : bezel, edge, Half(p.Outer), rm, rm);
 
                 Brush screen;
                 if (off) screen = B("B.ScreenOff");
-                else if (Profile != null && !p.Used) screen = B("B.ScreenUnused");
+                else if (p.VirtualPlate != null || (Profile != null && !p.Used)) screen = B("B.ScreenUnused");
                 else
                 {
                     LinearGradientBrush g = new LinearGradientBrush { StartPoint = new Point(0.41, 0), EndPoint = new Point(0.59, 1) };
@@ -160,7 +255,14 @@ namespace Slotter
                 }
                 dc.DrawRectangle(screen, null, p.Screen);
 
-                if (Profile != null && !p.Used)
+                if (p.VirtualPlate != null && !p.Used)
+                {
+                    bool compact = p.Screen.Width < 130;
+                    FormattedText label = Txt(PlateName(p.VirtualPlate), compact ? 11 : 12, FontWeights.SemiBold, B("B.Ink2"), Math.Max(1, p.Screen.Width - 16));
+                    double stackHeight = label.Height + (compact ? 4 : 8) + (compact ? 38 : 36);
+                    dc.DrawText(label, new Point(p.Screen.X + (p.Screen.Width - label.Width) / 2, p.Screen.Y + (p.Screen.Height - stackHeight) / 2));
+                }
+                else if (p.VirtualPlate == null && Profile != null && !p.Used)
                 {
                     FormattedText note = Txt("Not used by " + Profile.Name, 12, FontWeights.Normal, B("B.Ink3"));
                     note.MaxTextWidth = Math.Max(1, p.Screen.Width - 16);
@@ -173,8 +275,24 @@ namespace Slotter
 
             foreach (Placed p in Placements)
             {
-                if (!p.Monitor.Online && !Narrow) DrawPill(dc, p.Screen);
+                if (p.VirtualPlate == null && !p.Monitor.Online && !Narrow) DrawPill(dc, p.Screen);
                 DrawPlate(dc, p);
+            }
+            if (!addGhost.IsEmpty)
+            {
+                double footH = Math.Max(4, DeskLayout.FootH * Scale), neckW = ghostNeckWidth, footW = ghostFootWidth;
+                double cx = addGhost.X + addGhost.Width / 2;
+                dc.DrawRectangle(Vertical(Ui.C("B.StandShade"), Ui.C("B.StandHi")), null,
+                    new Rect(cx - neckW / 2, addGhost.Bottom, neckW, Math.Max(0, deskTop - footH - addGhost.Bottom)));
+                dc.DrawRoundedRectangle(Vertical(Ui.C("B.StandHi"), Ui.C("B.Stand")), new Pen(B("B.FootEdge"), 1),
+                    Half(new Rect(cx - footW / 2, deskTop - footH, footW, footH)), 3, 3);
+                dc.DrawRoundedRectangle(B("B.ScreenUnused"), Dashed(B("B.Ink3"), 1.5, 5, 3), Half(addGhost), Ui.D("R.Monitor"), Ui.D("R.Monitor"));
+                FormattedText plus = Txt("+", 28, FontWeights.Normal, B("B.Ink2"));
+                FormattedText label = Txt("Virtual desktop", 12, FontWeights.SemiBold, B("B.Ink2"), addGhost.Width);
+                dc.DrawText(plus, new Point(addGhost.X + (addGhost.Width - plus.Width) / 2, addGhost.Y + addGhost.Height / 2 - plus.Height));
+                dc.DrawText(label, new Point(addGhost.X + (addGhost.Width - label.Width) / 2, addGhost.Y + addGhost.Height / 2 + 5));
+                FormattedText ghostName = Txt("Add a desktop", 11, FontWeights.Normal, B("B.Ink2"), addGhost.Width);
+                dc.DrawText(ghostName, new Point(cx - ghostName.Width / 2, deskTop + (Narrow ? 4 : 8)));
             }
         }
 
@@ -214,21 +332,22 @@ namespace Slotter
                 dc.DrawRoundedRectangle(null, new Pen(B("B.Ink"), 2), new Rect(r.X - 3, r.Y - 3, r.Width + 6, r.Height + 6), 4, 4);
 
             ProgItem prog = empty ? null : FindProg(z.Prog);
-            string name = empty ? "Empty" : z.Prog;
+            string name = empty ? "Empty" : (prog == null ? z.Prog : prog.Name);
             // The selected zone keeps the large name and the exe from about 100 wide, so the zone
             // being edited always says what it launches.
             bool roomy = sel ? r.Width >= 100 && r.Height >= 56 : r.Width >= 110 && r.Height >= 56;
             double fs = r.Width > 150 && r.Height > 120 ? 17 : roomy ? 15 : 13;
-            double padX = roomy ? 8 : 4, padY = roomy ? 7 : 4;
+            double padX = roomy ? 8 : r.Width < 36 ? 2 : 4, padY = roomy ? 7 : Math.Max(0, Math.Min(4, (r.Height - 18) / 2));
 
             if (fault == null) dc.PushClip(new RectangleGeometry(r, rz, rz));
             double y = r.Y + padY;
 
             string n = (IndexOf(z) + 1).ToString(CultureInfo.InvariantCulture);
-            FormattedText num = Txt(n, 13, FontWeights.ExtraBold, sel ? B("B.SelectionInk") : B("B.Ink"));
-            double chipW = Math.Max(22, num.Width + 10);
-            dc.DrawRoundedRectangle(sel ? B("B.Selection") : B("B.ZoneChip"), null, new Rect(r.X + padX, y, chipW, 22), 3, 3);
-            dc.DrawText(num, new Point(r.X + padX + (chipW - num.Width) / 2, y + (22 - num.Height) / 2));
+            FormattedText num = Txt(n, r.Width < 36 ? 11 : 13, FontWeights.ExtraBold, sel ? B("B.SelectionInk") : B("B.Ink"));
+            double chipW = Math.Min(Math.Max(0, r.Width - padX * 2), Math.Max(22, num.Width + 10));
+            double chipH = Math.Min(22, Math.Max(0, r.Height - padY * 2));
+            dc.DrawRoundedRectangle(sel ? B("B.Selection") : B("B.ZoneChip"), null, new Rect(r.X + padX, y, chipW, chipH), 3, 3);
+            dc.DrawText(num, new Point(r.X + padX + (chipW - num.Width) / 2, y + (chipH - num.Height) / 2));
 
             FormattedText app = Txt(name, fs, empty ? FontWeights.SemiBold : FontWeights.Bold, empty ? B("B.Ink2") : B("B.Ink"));
             app.MaxLineCount = 1;
@@ -238,7 +357,7 @@ namespace Slotter
             bool stacked = r.Height >= padY * 2 + 22 + 3 + app.Height;
             double nameX = stacked ? r.X + padX : r.X + padX + chipW + 6;
             double room = r.Right - padX - nameX;
-            bool fits = room >= Math.Min(app.Width, fs * 2.5);
+            bool fits = room >= 24;
             if (fits)
             {
                 app.MaxTextWidth = Math.Max(1, room);
@@ -288,9 +407,9 @@ namespace Slotter
         void DrawPlate(DrawingContext dc, Placed p)
         {
             MonitorInfo m = p.Monitor;
-            FormattedText name = Txt(m.Name, 13, FontWeights.Bold, B("B.Ink"));
-            FormattedText tag = m.Online ? null : Txt("DISCONNECTED", 11, FontWeights.SemiBold, B("B.Ink2"));
+            FormattedText tag = m.Online ? null : Txt("DISCONNECTED", 11, FontWeights.SemiBold, B("B.Ink2"), p.Outer.Width / 2 - 16);
             double tagW = tag == null ? 0 : tag.Width + 12 + 4;
+            FormattedText name = Txt(p.VirtualPlate == null ? m.Name : PlateName(p.VirtualPlate), 13, FontWeights.Bold, B("B.Ink"), p.Outer.Width - tagW);
             double x = p.Plate.X - (name.Width + tagW) / 2;
             dc.DrawText(name, new Point(x, p.Plate.Y));
             if (tag != null)
@@ -299,26 +418,44 @@ namespace Slotter
                 dc.DrawRoundedRectangle(null, Dashed(B("B.Ink3"), 1, 3, 2), Half(box), 3, 3);
                 dc.DrawText(tag, new Point(box.X + 6, box.Y + 1));
             }
+            if (p.VirtualPlate != null)
+            {
+                FormattedText badge = Txt(PlateDesktopLabel(p), 10, FontWeights.SemiBold, B("B.Ink2"), p.Outer.Width - 23);
+                Rect bench = VirtualBenchBounds(p.VirtualPlate.Id);
+                double left = p.Plate.X - (badge.Width + 5 + bench.Width) / 2;
+                dc.DrawText(badge, new Point(left, p.Plate.Y + name.Height + 1));
+                dc.DrawRoundedRectangle(null, new Pen(B("B.Rule"), 1), Half(bench), 3, 3);
+                Pen icon = new Pen(B("B.Ink2"), 1.2) { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round };
+                double cx = bench.X + bench.Width / 2, cy = bench.Y + bench.Height / 2;
+                dc.DrawLine(icon, new Point(cx, cy - 4), new Point(cx, cy + 2));
+                dc.DrawLine(icon, new Point(cx - 2.5, cy - 0.5), new Point(cx, cy + 2));
+                dc.DrawLine(icon, new Point(cx + 2.5, cy - 0.5), new Point(cx, cy + 2));
+                dc.DrawLine(icon, new Point(cx - 4, cy + 4), new Point(cx + 4, cy + 4));
+                dc.DrawLine(icon, new Point(cx - 4, cy + 4), new Point(cx - 4, cy + 2));
+                dc.DrawLine(icon, new Point(cx + 4, cy + 4), new Point(cx + 4, cy + 2));
+                return;
+            }
             string detail = m.PixelW > 0 ? m.Resolution : "";
             if (m.HasSize) detail += (detail.Length > 0 ? " · " : "") + m.Diagonal + " in";
-            if (detail.Length == 0) return;
-            FormattedText d = Txt(detail, 11, FontWeights.Normal, B("B.Ink2"));
-            dc.DrawText(d, new Point(p.Plate.X - d.Width / 2, p.Plate.Y + name.Height + 1));
+            if (detail.Length > 0)
+            {
+                FormattedText d = Txt(detail, 11, FontWeights.Normal, B("B.Ink2"), p.Outer.Width);
+                dc.DrawText(d, new Point(p.Plate.X - d.Width / 2, p.Plate.Y + name.Height + 1));
+            }
         }
 
-        double PlateWidth(MonitorInfo m)
+        FormattedText Txt(string text, double size, FontWeight weight, Brush brush, double maxWidth = double.PositiveInfinity)
         {
-            double top = Txt(m.Name, 13, FontWeights.Bold, B("B.Ink")).Width
-                + (m.Online ? 0 : Txt("DISCONNECTED", 11, FontWeights.SemiBold, B("B.Ink2")).Width + 16);
-            string detail = (m.PixelW > 0 ? m.Resolution : "") + (m.HasSize ? " · " + m.Diagonal + " in" : "");
-            return Math.Max(top, Txt(detail, 11, FontWeights.Normal, B("B.Ink2")).Width);
-        }
-
-        FormattedText Txt(string text, double size, FontWeight weight, Brush brush)
-        {
-            return new FormattedText(text ?? "", CultureInfo.CurrentUICulture, FlowDirection.LeftToRight,
+            FormattedText formatted = new FormattedText(text ?? "", CultureInfo.CurrentUICulture, FlowDirection.LeftToRight,
                 new Typeface(Ui.UiFont, FontStyles.Normal, weight, FontStretches.Normal), size, brush,
                 VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            if (!double.IsPositiveInfinity(maxWidth))
+            {
+                formatted.MaxTextWidth = Math.Max(1, maxWidth);
+                formatted.MaxLineCount = 1;
+                formatted.Trimming = TextTrimming.CharacterEllipsis;
+            }
+            return formatted;
         }
 
         ProgItem FindProg(string name)
@@ -353,7 +490,17 @@ namespace Slotter
         protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
         {
             base.OnMouseLeftButtonDown(e);
-            Zone hit = HitZone(e.GetPosition(this));
+            Point point = e.GetPosition(this);
+            if (addGhost.Contains(point)) { if (VirtualAddClicked != null) VirtualAddClicked(); e.Handled = true; return; }
+            foreach (Placed p in Placements.Where(p => p.VirtualPlate != null))
+            {
+                if (!p.Used && p.Outer.Contains(point)) { if (VirtualSetupClicked != null) VirtualSetupClicked(p.VirtualPlate); e.Handled = true; return; }
+                Rect name = VirtualNameBounds(p.VirtualPlate.Id);
+                if (name.Contains(point) && e.ClickCount > 1) { if (VirtualRenameClicked != null) VirtualRenameClicked(p.VirtualPlate); e.Handled = true; return; }
+                Rect action = VirtualBenchBounds(p.VirtualPlate.Id);
+                if (action.Contains(point) && VirtualBenchClicked != null) { VirtualBenchClicked(p.VirtualPlate); e.Handled = true; return; }
+            }
+            Zone hit = HitZone(point);
             if (hit == null) return;
             Select(hit);
         }

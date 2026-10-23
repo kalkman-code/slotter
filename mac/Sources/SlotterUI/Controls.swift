@@ -273,7 +273,7 @@ struct InkTextField: View {
 
 // MARK: - Icons
 
-enum IconKind { case splitV, splitH, delete, reset, warn, chevron, check, plus, dots, cursor }
+enum IconKind { case splitV, splitH, delete, reset, warn, chevron, check, plus, dots, cursor, tray }
 
 /// The mock's inline SVG icons, drawn as paths on their own view boxes.
 struct Icon: View {
@@ -337,6 +337,12 @@ struct Icon: View {
                 }
                 context.fill(arrow, with: .color(.white))
                 context.stroke(arrow, with: .color(.black), lineWidth: 1)
+            case .tray:
+                context.stroke(Path {
+                    $0.move(to: CGPoint(x: 2, y: 7)); $0.addLine(to: CGPoint(x: 14, y: 7))
+                    $0.move(to: CGPoint(x: 2, y: 7)); $0.addLine(to: CGPoint(x: 3, y: 13)); $0.addLine(to: CGPoint(x: 13, y: 13)); $0.addLine(to: CGPoint(x: 14, y: 7))
+                    $0.move(to: CGPoint(x: 6, y: 7)); $0.addLine(to: CGPoint(x: 6.5, y: 9)); $0.addLine(to: CGPoint(x: 9.5, y: 9)); $0.addLine(to: CGPoint(x: 10, y: 7))
+                }, with: ink, style: line)
             }
         }
         .frame(width: size, height: size)

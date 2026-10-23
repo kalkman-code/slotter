@@ -244,10 +244,30 @@ namespace Slotter
                 tx -= ml; ty -= mt; tw += ml + mr; th += mt + mb;
             }
             bool moved = SetWindowPos(hwnd, IntPtr.Zero, tx, ty, tw, th, 0x0004 | 0x0010); // SWP_NOZORDER | SWP_NOACTIVATE
+            if (moved && GetWindowRect(hwnd, out wr))
+            {
+                RECT actual = wr;
+                if (DwmGetWindowAttribute(hwnd, 9, out fr, Marshal.SizeOf(typeof(RECT))) == 0 && fr.Right > fr.Left && fr.Bottom > fr.Top) actual = fr;
+                var visible = Rectangle.FromLTRB(actual.Left, actual.Top, actual.Right, actual.Bottom);
+                if (visible.Width > target.Width || visible.Height > target.Height)
+                {
+                    System.Drawing.Point origin = ConstrainWindowOrigin(visible, target, System.Windows.Forms.Screen.FromRectangle(target).WorkingArea);
+                    if (origin != visible.Location)
+                        moved = SetWindowPos(hwnd, IntPtr.Zero, wr.Left + origin.X - visible.Left, wr.Top + origin.Y - visible.Top, 0, 0, 0x0001 | 0x0004 | 0x0010);
+                }
+            }
             int wpid; GetWindowThreadProcessId(hwnd, out wpid);
             if (!moved) Log.Write("snap failed: " + Marshal.GetLastWin32Error() + " [pid " + wpid + " \"" + WindowTitle(hwnd) + "\"]");
             else Log.Write("snapped \"" + WindowTitle(hwnd) + "\" -> " + target);
             return moved;
+        }
+
+        public static System.Drawing.Point ConstrainWindowOrigin(Rectangle actual, Rectangle zone, Rectangle workArea)
+        {
+            Rectangle horizontal = actual.Width > zone.Width ? workArea : zone;
+            Rectangle vertical = actual.Height > zone.Height ? workArea : zone;
+            return new System.Drawing.Point(Math.Min(Math.Max(actual.Left, horizontal.Left), Math.Max(horizontal.Left, horizontal.Right - actual.Width)),
+                             Math.Min(Math.Max(actual.Top, vertical.Top), Math.Max(vertical.Top, vertical.Bottom - actual.Height)));
         }
 
         public static string WindowTitle(IntPtr hwnd)

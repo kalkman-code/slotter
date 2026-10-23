@@ -42,11 +42,6 @@ struct TopBar: View {
         .padding(.trailing, layout.narrow ? 10 : 16)
         .frame(height: barHeight)
         .overlay(alignment: .bottom) { Rectangle().fill(P.rule).frame(height: 1) }
-        .onChange(of: model.focusRequest) { _, request in
-            guard request == .rename else { return }
-            renameFocused = true
-            model.focusRequest = nil
-        }
     }
 
     @ViewBuilder
@@ -144,6 +139,14 @@ struct TopBar: View {
             .onSubmit { model.commitRename() }
             .onExitCommand { model.cancelRename() }
             .accessibilityLabel("Workspace name")
+            .onChange(of: model.focusRequest, initial: true) { _, request in
+                guard request == .rename else { return }
+                DispatchQueue.main.async {
+                    guard model.renaming != nil, model.focusRequest == .rename else { return }
+                    renameFocused = true
+                    model.focusRequest = nil
+                }
+            }
     }
 
     private var newWorkspaceButton: some View {
